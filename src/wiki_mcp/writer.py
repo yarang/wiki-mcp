@@ -18,6 +18,50 @@ import frontmatter
 # @MX:NOTE: [AUTO] ID validation regex — kebab-case, ASCII lowercase + digits + hyphen
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _HANGUL_RE = re.compile(r"[가-힯]")
+# 도메인(폴더) 세그먼트 — 소문자/숫자 시작, [a-z0-9_-]만 허용
+_DOMAIN_SEGMENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def validate_domain(domain: str) -> str:
+    """도메인 경로 검증 — 각 세그먼트가 [a-z0-9][a-z0-9_-]* 이어야 한다.
+
+    `..`·절대 경로·드라이브 문자·한글 도메인을 모두 이 규칙이 거부한다.
+    여러 세그먼트는 '/'로 잇는다(a/b → a/b). 실패 시 ValueError.
+    """
+    normalized = (domain or "").strip().strip("/")
+    if "\\" in normalized:  # 백슬래시 세그먼트(Windows·UNC 표기)는 허용하지 않는다
+        raise ValueError(f"도메인 형식 오류 (domain: '{domain}'). 폴더 구분은 '/'만 쓴다")
+    if not normalized:
+        raise ValueError("도메인이 비어 있음")
+    segments = [s for s in normalized.split("/") if s]
+    if not segments:
+        raise ValueError("도메인이 비어 있음")
+    for seg in segments:
+        if not _DOMAIN_SEGMENT_RE.match(seg):
+            raise ValueError(
+                f"도메인 형식 오류 (domain: '{domain}'). "
+                f"규칙: 세그먼트마다 소문자/숫자 시작, [a-z0-9_-]만 허용 (예: 'research', 'ml/rag')"
+            )
+    return "/".join(segments)
+
+
+def safe_wiki_path(wiki_root: Path, rel: str | Path) -> Path:
+    """wiki 루트 안의 경로만 돌려준다 — 경로 이탈 방지 공통 헬퍼 (S2).
+
+    MCP 도구 입력은 LLM이 만든다(원본 문서 속 지시문에 오염될 수 있다).
+    `..` 상승, 절대 경로, 드라이브 문자(C:\\), UNC(\\\\server)를 거부하고
+    최종 resolve() 결과가 wiki 루트 안인지 확인한다. 위반 시 ValueError.
+    """
+    s = str(rel)
+    if s.startswith(("\\\\", "//")):
+        raise ValueError(f"wiki 밖 경로는 쓸 수 없다 (네트워크 경로): {s!r}")
+    if s.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", s):
+        raise ValueError(f"wiki 밖 경로는 쓸 수 없다 (절대 경로): {s!r}")
+    root = Path(wiki_root).resolve()
+    resolved = (root / s).resolve()
+    if resolved != root and root not in resolved.parents:
+        raise ValueError(f"wiki 밖 경로는 쓸 수 없다: {resolved}")
+    return resolved
 
 
 def validate_note_id(id_str: str) -> str:
@@ -210,11 +254,17 @@ def _build_note_path(domain: str, clean_id: str, subtype: str = "concepts") -> s
 
 
 def _resolve_path_on_disk(idx, note_id: str) -> Path | None:
-    """idx.notes에서 note_id의 상대경로로 절대경로 반환."""
+    """idx.notes에서 note_id의 상대경로로 절대경로 반환 — wiki 밖이면 None(S2).
+
+    색인된 노트가 심볼릭 링크로 wiki 밖을 가리킬 수 있으니 resolve 로 확인한다.
+    """
     note = idx.notes.get(note_id)
     if not note:
         return None
-    return idx.wiki_path / note["path"]
+    try:
+        return safe_wiki_path(idx.wiki_path, note["path"])
+    except ValueError:
+        return None
 
 
 def _similar_ids(idx, query_id: str, limit: int = 5) -> list[str]:
@@ -299,23 +349,25 @@ def create_note(
             f"비슷한 기존 ID (오타 확인 권장): {', '.join(f'[[{s}]]' for s in similar)}"
         )
 
-    # 4. 경로 결정
-    if domain:
-        top_domain = domain
-    else:
-        # search_hybrid로 가장 관련 노트의 도메인 추정
-        try:
-            related = idx.search_hybrid(title or clean_id, top_k=3)
-        except Exception:
-            related = []
-        if related:
-            domains = [graph.domain_of(r["id"]) for r in related[:3] if r["id"] in idx.notes]
-            top_domain = max(set(domains), key=domains.count) if domains else "concepts"
+    # 4. 경로 결정 — 도메인은 세그먼트 규칙으로 검증하고 최종 경로가 wiki 안인지 확인한다(S2)
+    try:
+        if domain:
+            top_domain = validate_domain(domain)
         else:
-            top_domain = "concepts"
-    rel_path = _build_note_path(top_domain, clean_id)
-
-    abs_path = idx.wiki_path / rel_path
+            # search_hybrid로 가장 관련 노트의 도메인 추정
+            try:
+                related = idx.search_hybrid(title or clean_id, top_k=3)
+            except Exception:
+                related = []
+            if related:
+                domains = [graph.domain_of(r["id"]) for r in related[:3] if r["id"] in idx.notes]
+                top_domain = max(set(domains), key=domains.count) if domains else "concepts"
+            else:
+                top_domain = "concepts"
+        rel_path = _build_note_path(top_domain, clean_id)
+        abs_path = safe_wiki_path(idx.wiki_path, rel_path)
+    except ValueError as e:
+        return {"status": "error", "error": str(e), "id": clean_id, "domain": domain}
 
     # 5. 템플릿 로드 (지정 시) — frontmatter extra + 본문 스캐폴드
     today = date.today().isoformat()
@@ -452,7 +504,12 @@ def update_note(
             "suggestions": candidates,
         }
     abs_path = _resolve_path_on_disk(idx, clean_id)
-    if not abs_path or not abs_path.exists():
+    if abs_path is None:
+        return {
+            "status": "error",
+            "error": f"노트 [[{clean_id}]]의 경로가 wiki 밖을 가리킨다 — 수정 거부",
+        }
+    if not abs_path.exists():
         return {
             "status": "error",
             "error": (f"노트 [[{clean_id}]] 인덱스에 있으나 파일 없음 (path: {abs_path})"),
@@ -569,7 +626,12 @@ def add_link(
         }
 
     abs_path = _resolve_path_on_disk(idx, src_id)
-    if not abs_path or not abs_path.exists():
+    if abs_path is None:
+        return {
+            "status": "error",
+            "error": f"노트 [[{src_id}]]의 경로가 wiki 밖을 가리킨다 — 링크 추가 거부",
+        }
+    if not abs_path.exists():
         return {"status": "error", "error": f"소스 파일 없음: {abs_path}"}
 
     # 2. display 결정
@@ -668,7 +730,12 @@ def delete_note(
             "error": f"노트 [[{clean_id}]] 없음 (이미 삭제됨?)",
         }
     abs_path = _resolve_path_on_disk(idx, clean_id)
-    if not abs_path or not abs_path.exists():
+    if abs_path is None:
+        return {
+            "status": "error",
+            "error": f"노트 [[{clean_id}]]의 경로가 wiki 밖을 가리킨다 — 삭제 거부",
+        }
+    if not abs_path.exists():
         return {
             "status": "error",
             "error": (f"노트 [[{clean_id}]] 인덱스에 있으나 파일 없음: {abs_path}"),

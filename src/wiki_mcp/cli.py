@@ -153,10 +153,10 @@ def run_cli(argv: list[str]) -> int:
         return _emit({"error": {"code": e.code, "message": e.message}}, EXIT_INPUT)
     except OSError as e:
         return _emit({"error": {"code": "io_error", "message": str(e)}}, EXIT_INPUT)
-    except Exception as e:  # 내부 오류 — 스택은 로그로만, 메시지 문자열만 JSON으로
+    except Exception as e:  # 내부 오류 — 상세는 stderr 로만, JSON 은 일반 메시지(M7)
         print(f"wiki-mcp kb internal error: {type(e).__name__}: {e}", file=sys.stderr)
         return _emit(
-            {"error": {"code": "internal", "message": f"{type(e).__name__}: {e}"}},
+            {"error": {"code": "internal", "message": "내부 오류 — 로그(stderr)를 확인한다"}},
             EXIT_INTERNAL,
         )
     if "warning" in payload:

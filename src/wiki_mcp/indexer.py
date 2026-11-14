@@ -96,7 +96,6 @@ class WikiIndexer:
         """
         self.wiki_path = Path(wiki_path)
         self.data_dir = Path(data_dir)
-        self.data_dir.mkdir(parents=True, exist_ok=True)
         self.ollama_url = ollama_url.rstrip("/")
         self.embedding_model = embedding_model
         self.embedding_disabled = EMBEDDING_DISABLED
@@ -328,6 +327,9 @@ class WikiIndexer:
         self._bm25_doc_ids = [n["id"] for n in docs]
 
         if self.store:  # 저장소 없는 인덱서가 쓰면 mcpo 쪽의 새 캐시를 옛것으로 덮는다
+            # data_dir은 실제로 쓸 때 만든다 — 초기화 안 된 KB로 서버를 띄웠을 때
+            # <KB>/.kb/index 같은 폴더를 조용히 만들지 않는다(루트 오염 방지).
+            self.data_dir.mkdir(parents=True, exist_ok=True)
             cache_file.write_text(
                 json.dumps(new_cache, indent=2, ensure_ascii=False),
                 encoding="utf-8",

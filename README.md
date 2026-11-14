@@ -102,7 +102,13 @@ Claude에서는 이렇게 쓴다:
 - "출장비 정산 기준 찾아 줘" → `search_wiki`(노트+원본 함께, 원본 결과는
   파일·페이지·섹션 위치와 함께)
 - "그 문서 원문 좀 보여 줘" → `read_extract`(원본 근거 조각 읽기)
-- "새 자료 폴더 하나 더 등록해 줘" → `add_source` → `scan_sources`
+- "새 자료 폴더 하나 더 등록해 줘" → **앱(CLI)의 `kb add-source`** → `scan_sources`
+
+원본 등록·해제는 기본적으로 MCP 도구에 없다(0.3.1). MCP 도구 입력은 LLM이
+만들고 LLM은 원본 문서 속 지시문에 속을 수 있어서, 원본 목록을 바꾸는 일은
+확인 버튼이 있는 데스크톱 앱(`kb add-source --confirm`)만 한다. 명시적으로
+허용하려면 환경 변수 `WIKI_KB_MCP_MANAGE=1`로 `add_source`·`remove_source`
+도구를 노출할 수 있다 — 그 경우에도 민감해 보이는 경로는 오류로 거부된다.
 
 구조·상태 코드·제약은 [docs/kb-mode.md](docs/kb-mode.md) 참고.
 
@@ -142,62 +148,71 @@ stdout에는 JSON을 정확히 한 줄(UTF-8 고정), 로그는 stderr. 종료 �
 | `WIKI_INGEST_URL`·`_MODEL`·`_API_KEY`·`_TIMEOUT` | — | (기존 모드) OpenAI 호환 변환 LLM |
 | `WIKI_INGEST_EXT` | `.txt,.md,…,.jpg` | (기존 모드) 취급 확장자 |
 | `WIKI_INGEST_OCR` | `1` | 스캔 PDF·이미지 OCR 폴백(macOS만) |
-| `WIKI_INGEST_OCR_BIN` | (없음) | OCR 바이너리 경로 — **0.3.0부터 환경 변수로만** 받는다 |
+| `WIKI_INGEST_OCR_BIN` | (없음) | OCR 바이너리 경로 — **0.3.0부터 환경 변수로만** 받는다. 없으면 스캔 PDF는 `empty_text`로 기록된다 |
 | `WIKI_KB_MAX_EXTRACT_CHARS` | `200000` | KB 추출 결과 상한(문자) |
+| `WIKI_KB_MAX_INDEX_CHARS` | `30000000` | KB 검색 색인에 넣는 원본 텍스트 총량 상한(문자) — 넘친 파일은 `kb_status`의 `index_truncated`로 보고 |
+| `WIKI_KB_MCP_MANAGE` | (끔) | `1`이면 원본 등록·해제 도구를 MCP 에도 노출(기본은 앱 CLI 전용) |
 | `WIKI_MCP_TRANSPORT` | `stdio` | `stdio` 또는 `http`(원격 daemon) |
 | `WIKI_MCP_HOST`·`_PORT`·`_PATH` | `127.0.0.1:8765/mcp` | HTTP 전송 설정 |
 | `WIKI_MCP_API_KEY` | (없음) | HTTP 전송 Bearer 토큰 — 원격 노출 시 필수 |
 
-## 도구 (KB 모드: 22종)
+## 도구 (KB 모드: 기본 19종)
 
 기존 15종(0.2.4와 동일): `search_wiki` `read_note` `find_related`
 `list_domains` `find_broken_links` `suggest_new_note` `get_wiki_stats`
 `verify_citations` `reindex` `create_note` `ingest_raw` `list_templates`
-`update_note` `add_link` `delete_note`
+`update_note` `add_link` `delete_note` — 단 KB 모드에서는 `ingest_raw`가
+빠진다(raw 폴더 대신 원본 보존 스캔을 쓴다).
 
-KB 모드 추가 7종(설명 첫 줄에 [읽기]/[쓰기]/[관리] 표시):
+KB 모드 추가 5종(설명 첫 줄에 [읽기]/[관리] 표시):
 
 | 도구 | 구분 | 일 |
 | --- | --- | --- |
-| `add_source` | [관리] | 원본 폴더 등록(민감 이름 경고) |
 | `list_sources` | [읽기] | 등록된 원본 목록 |
-| `remove_source` | [관리] | 원본 등록 제거(원본 무사) |
 | `scan_sources` | [관리] | 결정적 스캔 — 새/바뀜/지움 추출 |
 | `list_changes` | [읽기] | 마지막 스캔 변경 목록(상태 필터) |
 | `read_extract` | [읽기] | 원본 추출 결과 조각 읽기(offset/limit) |
-| `kb_status` | [읽기] | 원본별 파일 수·실패 목록·마지막 스캔 |
+| `kb_status` | [읽기] | 원본별 파일 수·실패 목록·마지막 스캔·색인 상태 |
+
+`WIKI_KB_MCP_MANAGE=1`일 때만 추가되는 관리 2종:
+
+| 도구 | 구분 | 일 |
+| --- | --- | --- |
+| `add_source` | [관리] | 원본 폴더 등록(민감 이름은 오류로 거부 — 앱에서 등록) |
+| `remove_source` | [관리] | 원본 등록 제거(원본 무사) |
 
 `search_wiki`는 `scope`(`all`/`notes`/`sources`) 인자를 받는다. KB 모드가
-아니면 이 인자는 무시된다.
+아니면 이 인자는 무시되고 출력은 0.2.4와 같다.
 
 ## 개발
 
 ```bash
 git clone https://github.com/yarang/wiki-mcp && cd wiki-mcp
-uv venv && uv sync --extra dev --extra docs   # 문서 추출 라이브러리 포함
+uv venv && uv sync --extra dev
 uv run --extra dev ruff check .
 uv run --extra dev ruff format --check .
 uv run --extra dev pytest -q        # chromadb 없이 통과 (chromadb 테스트는 skip)
 ```
 
-- `uv sync --extra dev`만 하면 chromadb·문서 추출 라이브러리 없이 돌아간다
-  (해당 테스트는 자동 skip).
-- CI: Windows·macOS 행렬([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+- 문서 추출 라이브러리(pypdf 등)는 기본 의존성이라 `uv sync --extra dev`만
+  해도 추출기 테스트까지 돈다.
+- CI: Windows·macOS(3.12) + Ubuntu(3.10, 최소 지원 버전) 행렬
+  ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ### 의존성 구성
 
 | extra | 내용 | 없으면 |
 | --- | --- | --- |
-| (기본) | MCP 서버·BM25·노트 쓰기 | — |
+| (기본) | MCP 서버·BM25·노트 쓰기 + 문서 추출(pypdf·docx2txt·python-pptx·openpyxl·beautifulsoup4) | — |
 | `embed` | chromadb — dense 임베딩 검색 | BM25 전용으로 동작(stderr에 안내 한 줄) |
-| `docs` | pypdf·docx2txt·python-pptx·openpyxl·beautifulsoup4 | 해당 형식 추출이 `failed`로 기록된다 |
+| `docs` | (빈 별칭 — 0.3.1부터 추출기는 기본 의존성) | — |
 | `dev` | pytest·ruff·build | — |
 
 ### 소스 구성
 
 ```text
 src/wiki_mcp/
-├── server.py      # FastMCP 서버 — 도구 정의/등록 (KB 모드: 22종)
+├── server.py      # FastMCP 서버 — 도구 정의/등록 (KB 모드: 기본 19종)
 ├── cli.py         # 진입점 — 인자 없으면 MCP, `kb` 하위 명령은 JSON CLI
 ├── indexer.py     # 인덱싱 + 하이브리드 검색 (한글 2-gram, chromadb 지연 로딩)
 ├── kb/            # KB 모드 (0.3.0): store·sources·scanner·chunks·search·status
@@ -211,7 +226,7 @@ src/wiki_mcp/
 └── auth.py        # HTTP 모드 Bearer 인증
 ```
 
-## 이전 번들(openwebui-wiki-bundle) 사용자 안내
+## 이전 번들(openwebui-wiki-bundle) 사용자에게 바뀌는 점
 
 이 저장소는 Open WebUI 번들에 들어 있던 wiki-mcp 0.2.4를 분리한 독립
 저장소다. 번들 환경에서:
@@ -219,13 +234,18 @@ src/wiki_mcp/
 - 기존 환경 변수(`WIKI_PATH`, `WIKI_RAW_DIR`, `WIKI_INGEST_*`, …)와 도구
   15종, `ingest_raw`·raw 폴더 감시 동작은 그대로다.
 - `WIKI_KB_DIR`을 설정하지 않으면 KB 모드는 켜지지 않는다.
-- **chromadb가 기본 의존성에서 빠졌다** — 번들처럼 dense 검색이 필요하면
-  `wiki-mcp[embed]`으로 설치하면 이전과 같다(설치 안 해도 BM25 전용으로
-  동작).
-- 문서 추출 라이브러리(pypdf 등)는 `[docs]` extra로 옮겼다. 번들은
-  `wiki-mcp[embed,docs]`로 설치 권장.
-- OCR 바이너리 경로는 이제 `WIKI_INGEST_OCR_BIN` 환경 변수로만 받는다
-  (번들 폴더 구조 가정 제거).
+- **chromadb가 선택 의존성(`[embed]`)으로 바뀌었다** — dense 검색이 필요하면
+  `wiki-mcp[embed]`으로 설치한다. 없으면 BM25 전용으로 동작한다(시작 배너가
+  실제 dense 가용 여부 기준으로 나온다).
+- **한국어 랭킹이 2-gram 때문에 달라질 수 있다** — 질의 어간("기준")이
+  조사가 붙은 본문("기준을")을 찾는다. 대신 무관한 질의가 우연히 상위에
+  오르지 않게 가드(질의 원 토큰 겹침 또는 2-gram 절반 이상 겹침)를 둔다.
+- `search_wiki`에 `scope` 인자가 추가됐다(`all`/`notes`/`sources`, 기본
+  `all`). KB 모드가 아니면 이 인자는 무시되고 출력은 0.2.4와 같다.
+- 문서 추출 라이브러리(pypdf 등)는 0.3.1부터 **기본 의존성**이다(수강생이
+  `uvx` 한 줄로 쓰게). `[docs]` extra는 하위 호환용 빈 별칭으로 남는다.
+- OCR 바이너리 경로는 `WIKI_INGEST_OCR_BIN` 환경 변수로만 받는다(번들
+  폴더 구조 가정 제거). 지정하지 않으면 스캔 PDF는 `empty_text`로 기록된다.
 
 ## 라이선스
 

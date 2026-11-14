@@ -23,6 +23,13 @@ KB_DIR = Path(_env_kb).expanduser().resolve() if _env_kb else Path("")
 
 # KB 추출 결과 상한(문자) — 원문 하나가 색인을 잡아먹지 않게.
 KB_MAX_EXTRACT_CHARS = int(os.environ.get("WIKI_KB_MAX_EXTRACT_CHARS", "200000"))
+# KB 색인에 넣는 원본 텍스트 총량 상한(문자) — 큰 폴더가 메모리를 잡아먹지 않게.
+KB_MAX_INDEX_CHARS = int(os.environ.get("WIKI_KB_MAX_INDEX_CHARS", "30000000"))
+
+# 원본 등록·해제 도구를 MCP 로도 노출할지(기본 꺼짐). 사람 확인은 데스크톱 앱
+# (CLI kb add-source --confirm)에서만 일어난다 — LLM 은 원본 문서 속 지시문에
+# 속을 수 있으므로 기본은 MCP 에서 원본 목록을 바꾸지 못하게 막는다(S1).
+KB_MCP_MANAGE = os.environ.get("WIKI_KB_MCP_MANAGE", "").lower() in ("1", "true", "yes")
 
 
 def _default_wiki_path() -> Path:
@@ -49,8 +56,8 @@ else:
 if KB_ENABLED:
     _default_data = str(KB_DIR / ".kb" / "index")
 else:
-    # 기존 번들 기본값 — 소스 트리의 data/ (번들 경로가 없으면 그냥 쓰이지 않는다)
-    _default_data = str(_PKG_DIR.parent.parent.parent / "data")
+    # 0.2.4 번들 기본값 — <저장소>/data. (src/wiki_mcp → src → 저장소 루트)
+    _default_data = str(_PKG_DIR.parent.parent / "data")
 DATA_DIR = Path(os.environ.get("WIKI_DATA_DIR", _default_data)).expanduser().resolve()
 
 # 노트 템플릿 디렉토리 — 원하는 양식(frontmatter 필드 + 섹션 구조)을 .md 파일로 정의.
@@ -112,9 +119,10 @@ INGEST_XLSX_MAX_ROWS = int(os.environ.get("WIKI_INGEST_XLSX_MAX_ROWS", "200"))
 # OCR — 스캔/이미지 PDF 및 이미지 파일 처리 (Apple Vision, 오프라인).
 # 텍스트 추출이 빈약한 PDF에 자동 폴백. 바이너리가 없으면 조용히 건너뜀.
 # 0.3.0부터 OCR 바이너리 경로는 환경 변수로만 받는다(번들 폴더 구조 가정 제거).
+# 기본값은 None(M11) — 바이너리를 지정하지 않으면 스캔 PDF는 empty_text 로 기록된다.
 INGEST_OCR = os.environ.get("WIKI_INGEST_OCR", "1").lower() in ("1", "true", "yes")
 _env_ocr_bin = os.environ.get("WIKI_INGEST_OCR_BIN", "").strip()
-INGEST_OCR_BIN = Path(_env_ocr_bin).expanduser() if _env_ocr_bin else Path("")
+INGEST_OCR_BIN: Path | None = Path(_env_ocr_bin).expanduser() if _env_ocr_bin else None
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "bge-m3")

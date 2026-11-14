@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 from kb_helper import future_now
@@ -15,6 +16,98 @@ from kb_helper import future_now
 from wiki_mcp.kb.errors import KBError
 from wiki_mcp.kb.sources import add_source, list_sources, remove_source
 from wiki_mcp.kb.store import KnowledgeBase
+
+
+class TestRemotePaths:
+    """UNC·장치 네임스페이스 경로는 파일시스템을 건드리기 전에 거부한다(S4).
+
+    SMB 서버에 자격증명(NTLM)이 새는 것을 막는다 — exists()·resolve() 조차
+    네트워크 왕복을 일으킬 수 있어 문자열 단계에서 끊는다.
+    """
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "\\\\server\\share\\docs",
+            "//server/share/docs",
+            "\\\\?\\C:\\Users",
+            "\\\\.\\PhysicalDrive0",
+        ],
+    )
+    def test_remote_paths_rejected_before_fs(self, kb, path):
+        with pytest.raises(KBError) as ei:
+            add_source(kb, path)
+        assert ei.value.code == "source_remote_path"
+
+    def test_sources_yaml_remote_path_rejected(self, kb):
+        kb.save_sources([{"id": "src-x", "path": "\\\\nas\\share", "include": [], "exclude": []}])
+        with pytest.raises(KBError) as ei:
+            kb.load_sources()
+        assert ei.value.code == "source_remote_path"
+
+
+class TestForbiddenRoots:
+    """금지 폴더 규칙 — conftest가 기본 목록을 꺼도 원본 규칙은 그대로 검증한다.
+
+    Windows CI(windows-latest)의 tmp_path는 %LOCALAPPDATA%\\Temp 안이라 기본
+    AppData 규칙에 걸린다. 그래서 테스트 중에는 금지 목록 팩토리를 끄고
+    conftest 가 아닌 이 테스트에서만 원본 계산으로 판정한다.
+    """
+
+    def _forbidden(self, home: Path, p: Path) -> bool:
+        from wiki_mcp.kb.sources import _default_forbidden_roots
+        from wiki_mcp.kb.store import is_same_or_inside
+
+        target = Path(p).resolve()
+        if target == target.parent:
+            return True
+        if is_same_or_inside(home, target):  # 홈 자신·홈의 모든 상위 폴더
+            return True
+        return any(is_same_or_inside(target, c) for c in _default_forbidden_roots(home))
+
+    def test_appdata_rejected_even_without_env_vars(self, tmp_path):
+        home = tmp_path / "home"
+        home.mkdir()
+        assert self._forbidden(home, home / "AppData")
+        assert self._forbidden(home, home / "AppData" / "Local" / "Temp" / "pytest-1")
+        assert self._forbidden(home, home / "Library" / "Mobile Documents")
+
+    def test_home_ancestors_rejected(self, tmp_path):
+        home = tmp_path / "home" / "user"
+        home.mkdir(parents=True)
+        assert self._forbidden(home, home.parent)  # C:\\Users, /Users, /home 에 해당
+        assert self._forbidden(home, home)
+        # 홈 안의 일반 폴더는 거부 아님
+        assert not self._forbidden(home, home / "Documents")
+
+    def test_posix_mount_roots_rejected(self, tmp_path):
+        home = tmp_path / "home" / "user"
+        home.mkdir(parents=True)
+        for name in ("/Volumes", "/mnt", "/media"):
+            assert self._forbidden(home, Path(name) / "usb"), name
+
+    def test_windows_system_roots_from_env(self, tmp_path, monkeypatch):
+        """SystemRoot 등 후보는 C: 고정 문자열이 아니라 환경 변수로 만든다."""
+        home = tmp_path / "home"
+        home.mkdir()
+        win = tmp_path / "win-root"
+        win.mkdir()
+        monkeypatch.setenv("SystemRoot", str(win))
+        from wiki_mcp.kb.sources import _default_forbidden_roots
+
+        roots = [str(r) for r in _default_forbidden_roots(home)]
+        assert str(win) in roots
+
+    def test_injected_empty_roots_allow_tmp_paths(self, kb, tmp_path):
+        """conftest 가 끄는 팩토리가 꺼져 있으면 tmp_path 등록이 막히지 않는다.
+
+        이 테스트 자체가 autouse fixture(팩토리 → [])를 거친다 — Windows CI의
+        AppData Temp 경로 tmp_path가 system_folder 없이 등록되어야 한다.
+        """
+        somewhere = tmp_path / "somewhere"
+        somewhere.mkdir()
+        out = add_source(kb, somewhere)
+        assert "source" in out
 
 
 class TestInit:
@@ -99,8 +192,17 @@ class TestAddSource:
             add_source(kb, home, home=home)
         assert ei.value.code == "system_folder"
 
-    def test_system_folder_rejected(self, kb, tmp_path):
-        # home 주입으로 "~/Library", "~/AppData" 규칙을 결정적으로 검증
+    def test_system_folder_rejected_with_injected_home(self, kb, tmp_path, monkeypatch):
+        """home을 주입하면 ~/Library·~/AppData가 그대로 거부된다(팩토리 복원 검증).
+
+        conftest 가 기본 팩토리를 꺼 두었으니 이 테스트만 원본 팩토리로 되돌려
+        add_source 전체 경로(오류 코드 system_folder 포함)를 확인한다.
+        """
+        from wiki_mcp.kb import sources as kb_sources
+
+        monkeypatch.setattr(
+            kb_sources, "_forbidden_roots_factory", kb_sources._default_forbidden_roots
+        )
         for name in ("Library", "AppData"):
             sysdir = tmp_path / name
             sysdir.mkdir()
@@ -108,7 +210,6 @@ class TestAddSource:
                 add_source(kb, sysdir, home=tmp_path)
             assert ei.value.code == "system_folder"
 
-    def test_nested_inside_system_folder_rejected(self, kb, tmp_path):
         deep = tmp_path / "Library" / "Something"
         deep.mkdir(parents=True)
         with pytest.raises(KBError) as ei:
@@ -208,3 +309,95 @@ class TestAtomicWrites:
         raw = kb.sources_file.read_text(encoding="utf-8")
         assert "sources:" in raw
         assert source_dir.name in raw
+
+
+# ─── H6: 원본 id 중복 방지 ────────────────────────────────────────────
+class TestSourceIds:
+    def test_removed_id_not_reused(self, kb, tmp_path):
+        """삭제 후 재등록 — 기존 최대 번호 + 1 을 쓴다(중복 없음, repro C)."""
+        dirs = []
+        for n in range(3):
+            d = tmp_path / f"s{n}"
+            d.mkdir()
+            dirs.append(d)
+        ids = [add_source(kb, d)["source"]["id"] for d in dirs]
+        removed = ids[0]
+        remove_source(kb, removed)
+        again = add_source(kb, dirs[0])["source"]["id"]
+        assert again not in ids[1:]
+        assert again != removed
+        all_ids = [s["id"] for s in list_sources(kb)["sources"]]
+        assert len(all_ids) == len(set(all_ids))  # 중복 없음
+
+    def test_duplicate_ids_in_yaml_rejected(self, kb, source_dir):
+        kb.save_sources(
+            [
+                {"id": "src-1", "path": str(source_dir), "include": [], "exclude": []},
+                {"id": "src-1", "path": str(source_dir) + "2", "include": [], "exclude": []},
+            ]
+        )
+        with pytest.raises(KBError) as ei:
+            kb.load_sources()
+        assert ei.value.code == "corrupt_sources"
+
+
+# ─── M8: sources.yaml 형식 검증 ───────────────────────────────────────
+class TestSourcesValidation:
+    def _write(self, kb, raw: str):
+        kb.sources_file.parent.mkdir(parents=True, exist_ok=True)
+        kb.sources_file.write_text(raw, encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "- src-1\n- src-2\n",  # 최상위가 리스트
+            "sources: 'oops'\n",  # sources가 문자열
+            "sources:\n  - 평범한 문자열 항목\n",  # 항목이 문자열
+            "sources:\n  - id: src-1\n    include: []\n    exclude: []\n",  # path 없음
+            "sources:\n  - id: src-1\n    path: /tmp/x\n    include: '*.hwpx'\n    exclude: []\n",  # include가 문자열
+        ],
+    )
+    def test_malformed_yaml_is_corrupt_sources(self, kb, raw):
+        self._write(kb, raw)
+        with pytest.raises(KBError) as ei:
+            kb.load_sources()
+        assert ei.value.code == "corrupt_sources"
+
+    def test_valid_entries_load(self, kb, source_dir):
+        kb.save_sources(
+            [
+                {
+                    "id": "src-1",
+                    "path": str(source_dir),
+                    "include": ["*.hwpx"],
+                    "exclude": ["drafts/*"],
+                    "added_at": "2026-01-01T00:00:00+00:00",
+                }
+            ]
+        )
+        sources = kb.load_sources()
+        assert sources[0]["id"] == "src-1"
+        assert sources[0]["include"] == ["*.hwpx"]
+
+    def test_corrupt_sources_is_input_error_via_cli(self, tmp_path):
+        import json
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        kb_dir = tmp_path / "kb"
+        kb_dir.mkdir(parents=True, exist_ok=True)
+        (kb_dir / "sources.yaml").write_text("- a\n- b\n", encoding="utf-8")
+        run = subprocess.run(
+            [sys.executable, "-m", "wiki_mcp", "kb", "list-sources", "--kb", str(kb_dir)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env={
+                **os.environ,
+                "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src"),
+            },
+            timeout=60,
+        )
+        assert run.returncode == 1  # 종료 코드 1(cli-contract)
+        assert json.loads(run.stdout.strip())["error"]["code"] == "corrupt_sources"

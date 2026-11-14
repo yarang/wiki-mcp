@@ -263,3 +263,8 @@ class TestConfigResolution:
         out = self._config({"WIKI_PATH": str(tmp_path / "w")})
         assert out["kb_on"] is False
         assert out["wiki"] == str((tmp_path / "w").resolve())
+        # H3: 0.2.4 회귀 — DATA_DIR 기본값은 <저장소>/data (저장소 밖이 아님)
+        import wiki_mcp
+
+        repo_root = Path(wiki_mcp.__file__).resolve().parent.parent.parent
+        assert out["data"] == str((repo_root / "data").resolve())

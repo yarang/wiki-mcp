@@ -18,14 +18,19 @@ dependencies = [
     # Streamable HTTP transport (원격 daemon 모드)
     "uvicorn>=0.30",
     "starlette>=0.37",
+    # 문서 추출(PDF/DOCX/PPTX/XLSX/HTML) — 수강생은 uvx 한 줄로 쓴다(기본 의존성).
+    "pypdf>=3.0",
+    "docx2txt>=0.8",
+    "python-pptx>=0.6",
+    "openpyxl>=3.1",
+    "beautifulsoup4>=4.11",
 ]
 
 [project.optional-dependencies]
 # 임베딩(dense) 검색용 벡터 저장소. 없으면 BM25 전용으로 동작한다.
 embed = ["chromadb>=0.4.22"]
-# 문서 추출 라이브러리(PDF/DOCX/PPTX/XLSX/HTML). KB 모드에서 필요.
-# 없으면 해당 형식은 failed(unsupported…extract_error)로 기록된다.
-docs = ["pypdf>=3.0", "docx2txt>=0.8", "python-pptx>=0.6", "openpyxl>=3.1", "beautifulsoup4>=4.11"]
+# 0.3.0 초기엔 추출 라이브러리를 extra 로 뒀다 — 하위 호환용 빈 별칭.
+docs = []
 dev = ["pytest>=7.0", "ruff>=0.1.0", "build>=1.0"]
 
 [project.scripts]

@@ -5011,9 +5011,14 @@ name = "wiki-mcp"
 version = "0.3.0"
 source = { editable = "." }
 dependencies = [
+    { name = "beautifulsoup4" },
+    { name = "docx2txt" },
     { name = "mcp", extra = ["cli"] },
+    { name = "openpyxl" },
     { name = "pydantic" },
+    { name = "pypdf" },
     { name = "python-frontmatter" },
+    { name = "python-pptx" },
     { name = "rank-bm25" },
     { name = "requests" },
     { name = "starlette", version = "1.7.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -5029,30 +5034,23 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
-docs = [
-    { name = "beautifulsoup4" },
-    { name = "docx2txt" },
-    { name = "openpyxl" },
-    { name = "pypdf" },
-    { name = "python-pptx" },
-]
 embed = [
     { name = "chromadb" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "beautifulsoup4", marker = "extra == 'docs'", specifier = ">=4.11" },
+    { name = "beautifulsoup4", specifier = ">=4.11" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.0" },
     { name = "chromadb", marker = "extra == 'embed'", specifier = ">=0.4.22" },
-    { name = "docx2txt", marker = "extra == 'docs'", specifier = ">=0.8" },
+    { name = "docx2txt", specifier = ">=0.8" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.0,<2" },
-    { name = "openpyxl", marker = "extra == 'docs'", specifier = ">=3.1" },
+    { name = "openpyxl", specifier = ">=3.1" },
     { name = "pydantic", specifier = ">=2.0" },
-    { name = "pypdf", marker = "extra == 'docs'", specifier = ">=3.0" },
+    { name = "pypdf", specifier = ">=3.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "python-frontmatter", specifier = ">=1.0" },
-    { name = "python-pptx", marker = "extra == 'docs'", specifier = ">=0.6" },
+    { name = "python-pptx", specifier = ">=0.6" },
     { name = "rank-bm25", specifier = ">=0.2.2" },
     { name = "requests", specifier = ">=2.31" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },

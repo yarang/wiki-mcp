@@ -85,6 +85,20 @@ def kb_root(tmp_path: Path) -> Path:
     return tmp_path / "kb"
 
 
+@pytest.fixture(autouse=True)
+def _kb_forbidden_roots_off(monkeypatch):
+    """테스트 중에는 금지 폴더 기본 목록을 끈다(Windows CI 대응).
+
+    windows-latest의 tmp_path는 %LOCALAPPDATA%\\Temp 안이라 기본 AppData
+    규칙에 걸려 수십 개 테스트가 system_folder로 실패한다. 제품 규칙 자체는
+    test_kb_sources.py::TestForbiddenRoots 가 원본 계산으로 계속 검증한다.
+    """
+    from wiki_mcp.kb import sources as kb_sources
+
+    monkeypatch.setattr(kb_sources, "_forbidden_roots_factory", lambda home: [])
+    return None
+
+
 @pytest.fixture
 def kb(kb_root: Path):
     """초기화된 KnowledgeBase."""

@@ -64,10 +64,11 @@ wiki-mcp kb <하위명령> --kb <폴더> [인자...]
 | `kb_not_initialized` | `init` 안 한 KB 폴더 |
 | `source_not_found` | 존재하지 않는 경로 |
 | `source_not_a_directory` | 폴더가 아닌 경로 |
+| `source_remote_path` | UNC·장치 경로(`\\server\share`, `\\?\`, `\\.\`, `//…`) — 파일시스템 접근 전에 거부 |
 | `overlaps_kb` | KB 폴더 안/겹침 |
 | `overlaps_existing` | 이미 등록된 원본의 상위·하위 |
-| `system_folder` | 드라이브 루트·홈 전체·시스템 폴더(`C:\Windows`, `Program Files`, `AppData`, `/System`, `/Library`, `~/Library`) |
-| `corrupt_sources` | sources.yaml 손상 |
+| `system_folder` | 드라이브 루트·홈과 홈의 모든 상위 폴더(`C:\Users`, `/Users`, `/home`)·시스템 폴더(환경 변수 기준: `%SystemRoot%`, `%ProgramFiles%`, `%ProgramData%`, `%LOCALAPPDATA%`, `%APPDATA%`, `/System`, `/Library`, `~/Library`)·공유 마운트(`/Volumes`, `/mnt`, `/media`) |
+| `corrupt_sources` | sources.yaml 손상 — 최상위가 리스트, 항목이 문자열, path 없음, include가 문자열, id 중복 |
 
 glob 규칙: 패턴에 `/`가 있으면 원본 루트 기준 상대 경로 전체에, 없으면
 파일명에 적용한다(`*.hwpx`, `drafts/*`).
@@ -91,22 +92,33 @@ glob 규칙: 패턴에 `/`가 있으면 원본 루트 기준 상대 경로 전�
 
 ### `wiki-mcp kb scan --kb DIR`
 
-모든 원본을 스캔한다(결정적, LLM·네트워크 없음). 스캔 중 잠금(`.kb/scan.lock`)으로
-동시 실행을 막는다 — 이미 돌고 있으면 `scan_in_progress`(1).
+모든 원본을 스캔한다(결정적, LLM·네트워크 없음). 스캔 중 잠금(`.kb/scan.lock`,
+PID 기반)으로 동시 실행을 막는다 — 이미 돌고 있으면 `scan_in_progress`(1).
 
 ```json
-{"new": 2, "changed": 0, "deleted": 0, "unchanged": 1, "failed": 1, "extracted": 2, "duration_ms": 41,
+{"new": 2, "changed": 0, "deleted": 0, "unchanged": 1, "failed": 1, "extracted": 2,
+ "skipped_sensitive": 1, "duration_ms": 41,
  "changes": [{"source_id": "src-…", "rel_path": "보고서.hwpx", "status": "new"},
-             {"source_id": "src-…", "rel_path": "legacy.hwp", "status": "failed", "reason": "unsupported"}]}
+             {"source_id": "src-…", "rel_path": "legacy.hwp", "status": "failed", "reason": "unsupported"}],
+ "warnings": []}
 ```
 
 - `extracted`: 실제로 새로 쓴 추출 파일 수. 같은 내용(sha256)의 파일은 추출
   하나를 공유하므로 `new`보다 작을 수 있다. 재스캔에서 변경이 없으면 0.
+- `skipped_sensitive`: 민감 이름(비밀번호·키 파일 등)으로 읽지 않고 건너뛴
+  파일 수. 파일 이름은 어디에도 기록되지 않는다.
 - `changes`: 이번 스캔의 변경 목록(상태가 바뀐 항목만). 원본은 절대 수정되지
   않는다 — 전후 파일 목록·해시·mtime이 같다는 것이 테스트로 보장된다.
+- `warnings`: 원본 폴더가 없는 등 이월 사유(`source_missing`). CLI 는
+  changes 를 자르지 않는다(MCP 도구 결과는 최대 50건 + `truncated: true`).
+- 수정 중(mtime 2초 미만)·stat 실패·순회 오류 파일은 삭제되지 않고 이전
+  상태로 이월된다. 참조가 끊긴 추출 파일은 스캔 끝에 정리된다.
 - 실패 사유(`reason`)는 고정 코드: `unsupported` `too_large`(50MB 초과)
-  `encrypted` `corrupt` `empty_text` `locked`(Windows 공유 위반 등)
-  `extract_error`. 오류 원문·파일 내용은 manifest에 남지 않는다.
+  `encrypted` `corrupt`(깨진 파일·zip 폭탄 포함) `empty_text` `locked`
+  `cloud_only`(OneDrive 온디맨드) `extract_error`. `locked`·`extract_error`는
+  매 스캔 재시도하고 나머지는 size/mtime이 바뀔 때만 재시도한다.
+- manifest.json이 손상됐으면 `.kb/manifest.json.corrupt-<타임스탬프>`로
+  격리하고 빈 상태로 다시 색인한다(추출 파일은 sha로 재사용).
 
 ### `wiki-mcp kb status --kb DIR`
 
@@ -114,15 +126,21 @@ glob 규칙: 패턴에 `/`가 있으면 원본 루트 기준 상대 경로 전�
 {"sources": [{"id": "src-…", "path": "/abs", "files": 3, "by_status": {"ok": 2, "failed": 1},
               "failed": [{"rel_path": "legacy.hwp", "reason": "unsupported"}]}],
  "last_scan": {"scanned_at": "2026-11-15T09:00:00+00:00",
-               "results": {"new": 2, "changed": 0, "deleted": 0, "unchanged": 0, "failed": 1, "extracted": 2, "duration_ms": 41}}}
+               "results": {"new": 2, "changed": 0, "deleted": 0, "unchanged": 0, "failed": 1,
+                            "extracted": 2, "skipped_sensitive": 1, "duration_ms": 41}}}
 ```
 
-스캔을 한 번도 돌리지 않았으면 `last_scan`은 `null`.
+스캔을 한 번도 돌리지 않았으면 `last_scan`은 `null`. MCP `kb_status` 도구는
+여기에 색인 문자 상한 초과 파일 목록(`index_truncated`)을 덧붙인다.
 
 ## 공통 `error.code` (모든 하위 명령)
 
-`kb_not_initialized` `source_not_found` `scan_in_progress` `corrupt_sources`
-`corrupt_manifest` `invalid_arguments` `unknown_command` `io_error` `internal`
+`kb_not_initialized` `source_not_found` `source_remote_path` `scan_in_progress`
+`kb_busy`(쓰기 잠금 대기 초과) `corrupt_sources` `corrupt_manifest`
+`invalid_arguments` `unknown_command` `io_error` `internal`
+
+`internal`(2)의 message는 일반 문구다 — 상세(예외 종류·메시지)는 stderr
+로그에만 남는다.
 
 ## 호출 예 (Rust 앱)
 

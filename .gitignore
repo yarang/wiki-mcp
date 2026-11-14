@@ -1,6 +1,9 @@
 .venv/
-data/chroma/
-data/index_cache.json
+data/
+.kb/
+sources.yaml
+.env
+.coverage
 __pycache__/
 *.pyc
 .pytest_cache/

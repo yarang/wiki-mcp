@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
-from hwpx_helper import br, cell, make_hwpx, p, row, sec, t, tab, tbl
+from hwpx_helper import br, cell, make_hwpx, p, p_raw, row, sec, t, tab, tbl
 
 from wiki_mcp.extract import ExtractionError, extract_text
 
@@ -136,12 +138,12 @@ class TestHwpxSections:
         assert "본문 문단만" in out
 
 
-# ─── 안전 상한 ────────────────────────────────────────────────────────
-class TestHwpxLimits:
+# ─── 안전 상한(zip 공용 방어, M13) ────────────────────────────────────
+class TestZipLimits:
     def test_too_many_entries_rejected(self, tmp_path, monkeypatch):
         from wiki_mcp import extract as ex
 
-        monkeypatch.setattr(ex, "_HWPX_MAX_ENTRIES", 3)
+        monkeypatch.setattr(ex, "_ZIP_MAX_ENTRIES", 3)
         sections = {f"Contents/section{i}.xml": sec(p(t(f"{i} 번째 문단 내용"))) for i in range(4)}
         f = make_hwpx(tmp_path / "a.hwpx", sections)
         with pytest.raises(ExtractionError) as ei:
@@ -151,13 +153,46 @@ class TestHwpxLimits:
     def test_uncompressed_total_rejected(self, tmp_path, monkeypatch):
         from wiki_mcp import extract as ex
 
-        monkeypatch.setattr(ex, "_HWPX_MAX_UNCOMPRESSED", 100)
+        monkeypatch.setattr(ex, "_ZIP_MAX_UNCOMPRESSED", 100)
         f = make_hwpx(
             tmp_path / "a.hwpx",
             {
                 "Contents/section0.xml": sec(p(t("가" * 200))),
             },
         )
+        with pytest.raises(ExtractionError) as ei:
+            extract_text(f)
+        assert ei.value.code == "corrupt"
+
+    def test_high_compression_ratio_rejected(self, tmp_path, monkeypatch):
+        """압축비 100 초과 항목 — zip bomb 후보는 파싱 전에 거부한다."""
+        from wiki_mcp import extract as ex
+
+        monkeypatch.setattr(ex, "_ZIP_MAX_RATIO", 5)
+        f = make_hwpx(
+            tmp_path / "a.hwpx",
+            {"Contents/section0.xml": sec(p(t("가" * 500)))},  # 반복 텍스트는 잘 압축된다
+        )
+        with pytest.raises(ExtractionError) as ei:
+            extract_text(f)
+        assert ei.value.code == "corrupt"
+
+    def test_bad_docx_is_corrupt_not_extract_error(self, tmp_path):
+        """zip이 아닌 docx는 corrupt 사유로 기록된다(M13 — 재시도 정책과 연결)."""
+        f = tmp_path / "bad.docx"
+        f.write_bytes(b"not a docx")
+        with pytest.raises(ExtractionError) as ei:
+            extract_text(f)
+        assert ei.value.code == "corrupt"
+
+    def test_doctype_in_xml_rejected(self, tmp_path):
+        """DTD/ENTITY 선언이 든 섹션 XML은 파싱 전에 거부한다(XXE 방어)."""
+        evil = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<!DOCTYPE hs:sec [<!ENTITY xxe "텍스트">]>'
+            '<hs:sec xmlns:hs="u" xmlns:hp="u"><hp:p><hp:r><hp:t>&xxe;</hp:t></hp:r></hp:p></hs:sec>'
+        )
+        f = make_hwpx(tmp_path / "evil.hwpx", {"Contents/section0.xml": evil})
         with pytest.raises(ExtractionError) as ei:
             extract_text(f)
         assert ei.value.code == "corrupt"
@@ -250,3 +285,106 @@ class TestPdfPageCollection:
 
         pages = _pdf_collect_pages(self._Reader("boom", "둘째 페이지 본문"))
         assert pages == [(2, "둘째 페이지 본문")]
+
+
+# ─── 실제 문서 구조: hp:t 혼합 콘텐츠·문단 안 표 (H2) ─────────────────
+class TestRealHwmlStructure:
+    """실제 한글 파일에서 확인한 구조 — 꼬리 텍스트(.tail)와 문단 안 표."""
+
+    def test_linebreak_inside_hp_t_with_tail_text(self, tmp_path):
+        """`<hp:t>앞<hp:lineBreak/>뒤</hp:t>` — 줄바꿈 뒤 텍스트까지 보존한다."""
+        f = make_hwpx(
+            tmp_path / "a.hwpx",
+            {
+                "Contents/section0.xml": sec(
+                    p(t("국가과학기술", br())) + p(t("8)"), t("연차별 사업비"), t(br(), "(백만원)"))
+                ),
+            },
+        )
+        lines = [ln for ln in extract_text(f).splitlines() if ln]
+        assert lines == ["국가과학기술", "8)연차별 사업비", "(백만원)"]
+
+    def test_tab_inside_hp_t_with_tail_text(self, tmp_path):
+        f = make_hwpx(
+            tmp_path / "a.hwpx",
+            {
+                "Contents/section0.xml": sec(
+                    p(t("항목과", tab(), "값이 탭으로 이어지는 표기 예시 본문이다"))
+                )
+            },
+        )
+        assert extract_text(f).splitlines()[0] == "항목과\t값이 탭으로 이어지는 표기 예시 본문이다"
+
+    def test_table_nested_in_paragraph_run(self, tmp_path):
+        """실제 문서의 표 — hp:p > hp:run > hp:tbl. 문단 텍스트와 표를 나눠 낸다."""
+        body = p_raw(
+            t("아래 표는 예산이다. 설명 문단이 충분히 길다.")
+            + tbl(
+                row(cell(p(t("항목"))), cell(p(t("금액")))),
+                row(cell(p(t("교재"))), cell(p(t("300000")))),
+            )
+        )
+        f = make_hwpx(tmp_path / "a.hwpx", {"Contents/section0.xml": sec(body)})
+        lines = [ln for ln in extract_text(f).splitlines() if ln]
+        assert "아래 표는 예산이다. 설명 문단이 충분히 길다." in lines
+        assert "항목 | 금액" in lines
+        assert "교재 | 300000" in lines
+        # 문단이 표 앞 — 순서 보존
+        assert lines.index("아래 표는 예산이다. 설명 문단이 충분히 길다.") < lines.index(
+            "항목 | 금액"
+        )
+
+    def test_multiline_cell_with_break_kept_in_one_cell_line(self, tmp_path):
+        """셀 안 문단이 줄바꿈을 포함해도 셀은 한 줄로 평면화한다."""
+        body = p(t("셀 평면화 검증용 충분히 긴 안내 문단을 여기 둔다.")) + tbl(
+            row(
+                cell(p(t("셀 첫 줄", br(), "셀 둘째 줄"))),
+                cell(p(t("값"))),
+            )
+        )
+        f = make_hwpx(tmp_path / "a.hwpx", {"Contents/section0.xml": sec(body)})
+        out = extract_text(f)
+        assert "셀 첫 줄 셀 둘째 줄 | 값" in out.splitlines()
+
+    def test_paragraph_structure_like_real_file(self, tmp_path):
+        """run 여러 개·속성이 붙은 실제형 문단 — 순서대로 텍스트가 이어진다."""
+        para = (
+            '<hp:p id="1" paraPrIDRef="0" pageBreak="0">'
+            '<hp:run charPrIDRef="8"><hp:t>(       </hp:t></hp:run>'
+            '<hp:run charPrIDRef="116"><hp:t>사 업 명</hp:t></hp:run>'
+            '<hp:run charPrIDRef="8"><hp:t>        )</hp:t></hp:run>'
+            "</hp:p>"
+        )
+        f = make_hwpx(
+            tmp_path / "a.hwpx",
+            {
+                "Contents/section0.xml": sec(
+                    para + '<hp:p id="2"><hp:run><hp:secPr id="x" tabStop="8000"/>'
+                    "<hp:t>속성 요소는 건너뛰고 이 텍스트만 나온다</hp:t></hp:run>"
+                    "</hp:p>"
+                )
+            },
+        )
+        out = extract_text(f)
+        assert " ".join(out.splitlines()[0].split()) == "( 사 업 명 )"
+        assert "속성 요소는 건너뛰고 이 텍스트만 나온다" in out
+
+
+# ─── 실제 한글 파일 검증 — WIKI_MCP_REAL_HWPX_DIR 있을 때만 ────────────
+REAL_HWPX_DIR = os.environ.get("WIKI_MCP_REAL_HWPX_DIR", "")
+
+
+@pytest.mark.skipif(not REAL_HWPX_DIR, reason="WIKI_MCP_REAL_HWPX_DIR 미설정 — 실제 파일 검증 생략")
+class TestRealHwpxFiles:
+    def test_real_files_have_text_and_pipe_tables(self):
+        from pathlib import Path
+
+        files = sorted(Path(REAL_HWPX_DIR).rglob("*.hwpx"))
+        assert files, f"hwpx 파일이 없다: {REAL_HWPX_DIR}"
+        checked = 0
+        for f in files:
+            text = extract_text(f, max_chars=0)
+            assert len(text.strip()) > 0, f"글자 수 0: {f.name}"
+            assert " | " in text, f"표 행 구분 없음: {f.name}"
+            checked += 1
+        assert checked >= 1

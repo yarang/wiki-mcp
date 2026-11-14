@@ -27,10 +27,47 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".gif", ".heic"}
 
 _MIN_CHARS = 20  # 유의미 텍스트 최소 길이 (미만이면 추출 실패로 간주)
 
-# HWPX 안전 상한 — 파싱 전에 zip 메타데이터로 검사한다 (zip bomb 방어)
-_HWPX_MAX_ENTRIES = 1000
-_HWPX_MAX_UNCOMPRESSED = 50 * 1024 * 1024
+# zip 기반 문서(HWPX·DOCX·PPTX·XLSX) 안전 상한 — 파싱 전에 zip 메타데이터로
+# 검사한다(zip bomb 방어, M13). 항목 수·해제 합·항목당 압축비.
+_ZIP_MAX_ENTRIES = 1000
+_ZIP_MAX_UNCOMPRESSED = 50 * 1024 * 1024
+_ZIP_MAX_RATIO = 100
+# 직접 파싱하는 XML에서 거부하는 마커(XXE 방어 — ElementTree 는 외부 엔티티를
+# 해석하지 않지만 내부 엔티티 확장으로 불릴 수 있으니 아예 거부한다)
+_XML_FORBIDDEN_MARKERS = (b"<!DOCTYPE", b"<!ENTITY")
 _HWPX_SECTION_RE = re.compile(r"^Contents/section(\d+)\.xml$")
+
+
+def _check_zip_safety(path: Path) -> None:
+    """zip 기반 문서의 폭탄 방어(M13) — 항목 수·해제 합·압축비 상한.
+
+    DOCX·PPTX·XLSX·HWPX 모두 파싱(라이브러리 import·랜더링) 전에 이 검사를
+    지난다. 위반하면 ExtractionError(corrupt).
+    """
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as zf:
+            infos = zf.infolist()
+            if len(infos) > _ZIP_MAX_ENTRIES:
+                raise ExtractionError(f"zip 항목 수 상한 초과({len(infos)}개)", code="corrupt")
+            total = 0
+            for info in infos:
+                total += info.file_size
+                if total > _ZIP_MAX_UNCOMPRESSED:
+                    raise ExtractionError(f"zip 해제 크기 상한 초과({total}B)", code="corrupt")
+                if info.compress_size > 0 and info.file_size / info.compress_size > _ZIP_MAX_RATIO:
+                    raise ExtractionError(
+                        f"zip 항목 압축비 상한 초과({info.filename}: "
+                        f"{info.file_size}/{info.compress_size})",
+                        code="corrupt",
+                    )
+    except zipfile.BadZipFile as e:
+        raise ExtractionError(f"zip 문서가 아니다: {e}", code="corrupt") from e
+    except ExtractionError:
+        raise
+    except Exception as e:  # zipfile 내부 오류도 corrupt 로 통일
+        raise ExtractionError(f"zip 검사 실패: {e}", code="corrupt") from e
 
 
 class ExtractionError(Exception):
@@ -46,8 +83,11 @@ class ExtractionError(Exception):
         self.code = code
 
 
-def _ocr_file(path: Path, ocr_bin, timeout: int = 300) -> str:
-    """vision-ocr 바이너리(Apple Vision)로 PDF/이미지에서 텍스트 인식. 오프라인."""
+def _ocr_file(path: Path, ocr_bin, timeout: int = 60) -> str:
+    """vision-ocr 바이너리(Apple Vision)로 PDF/이미지에서 텍스트 인식. 오프라인.
+
+    timeout 기본 60초(H5) — 스캔 한 장이 이벤트 루프를 오래 붙잡지 않게.
+    """
     if not ocr_bin or not Path(ocr_bin).exists():
         raise ExtractionError("OCR 바이너리 없음(vision-ocr) — OCR 불가")
     try:
@@ -240,23 +280,54 @@ def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+def _hwpx_emit_inline(el, parts: list[str], tables: list) -> None:
+    """요소의 인라인 텍스트를 문서 순서대로 뽑는다(H2 — 실제 구조).
+
+    실제 한글 문서는 hp:p > hp:run > hp:t 이고, hp:tab·hp:lineBreak 가
+    **hp:t 안에** 중첩되며 그 뒤 텍스트는 꼬리(.tail)로 온다
+    (`<hp:t>가<hp:lineBreak/>나다</hp:t>`). text → 자식 → tail 순서로
+    재귀하며 둘 다 보존한다. 문단 안의 hp:tbl 은 tables 에 따로 모은다.
+    run·t 밖의 요소(secPr, linesegarray 등 서식 정의)에는 텍스트가 없으니
+    건너뛴다.
+    """
+    if el.text:
+        parts.append(el.text)
+    for child in el:
+        name = _local(child.tag)
+        if name == "t":
+            _hwpx_emit_inline(child, parts, tables)
+        elif name == "tab":
+            parts.append("\t")
+        elif name == "lineBreak":
+            parts.append("\n")
+        elif name == "tbl":
+            tables.append(child)
+        elif name == "run":  # hp:run — 인라인 컨테이너
+            _hwpx_emit_inline(child, parts, tables)
+        if child.tail:
+            parts.append(child.tail)
+
+
 def _hwpx_inline_text(el) -> str:
-    """hp:p 문단 하나의 텍스트. hp:tab→탭, hp:lineBreak→줄바꿈, hp:t→텍스트."""
+    """요소의 인라인 텍스트 전체(표 제외). hp:tab→탭, hp:lineBreak→줄바꿈."""
     parts: list[str] = []
-
-    def walk(e) -> None:
-        for child in e:
-            name = _local(child.tag)
-            if name == "t":
-                parts.append(child.text or "")
-            elif name == "tab":
-                parts.append("\t")
-            elif name == "lineBreak":
-                parts.append("\n")
-            walk(child)
-
-    walk(el)
+    _hwpx_emit_inline(el, parts, [])
     return "".join(parts)
+
+
+def _hwpx_paragraph_lines(p_el) -> list[str]:
+    """문단 하나를 줄 목록으로 — 문단 텍스트 한 줄 + 문단 안 표 줄들(H2).
+
+    실제 문서는 표가 hp:p > hp:run > hp:tbl 로 문단 안에 중첩된다. 문단
+    텍스트와 표를 각각의 줄로 분리해 순서를 보존한다.
+    """
+    parts: list[str] = []
+    tables: list = []
+    _hwpx_emit_inline(p_el, parts, tables)
+    lines = ["".join(parts)]
+    for tbl in tables:
+        lines.extend(_hwpx_table_lines(tbl))
+    return lines
 
 
 def _hwpx_table_lines(tbl) -> list[str]:
@@ -279,25 +350,31 @@ def _hwpx_table_lines(tbl) -> list[str]:
 
 
 def _hwpx_cell_text(tc) -> str:
-    """hp:tc 셀 하나의 텍스트 — 셀 안 문단들은 공백으로 이어 한 줄로."""
-    paras: list[str] = []
+    """hp:tc 셀 하나의 텍스트 — 셀 안 줄바꿈·문단은 공백으로 이어 한 줄로."""
 
-    def walk(e) -> None:
+    def walk(e, out: list[str]) -> None:
         for child in e:
             name = _local(child.tag)
             if name == "p":
-                paras.append(_hwpx_inline_text(child).strip())
+                text = " ".join(_hwpx_inline_text(child).split())
+                if text:
+                    out.append(text)
             elif name == "tbl":
-                paras.extend(_hwpx_table_lines(child))
+                out.extend(_hwpx_table_lines(child))
             else:
-                walk(child)
+                walk(child, out)
 
-    walk(tc)
-    return " ".join(p for p in paras if p)
+    parts: list[str] = []
+    walk(tc, parts)
+    return " ".join(parts)
 
 
 def _hwpx_xml_to_text(data: bytes) -> str:
-    # ElementTree는 외부 엔티티를 해석하지 않는다(XXE에 기본 안전).
+    # XXE·엔티티 확장 방어(M13) — DTD·ENTITY 선언이 있으면 파싱 전에 거부한다.
+    # ElementTree는 외부 엔티티를 해석하지 않지만 내부 엔티티 폭탄은 막지 못한다.
+    head = data[:4096]
+    if any(marker in head for marker in _XML_FORBIDDEN_MARKERS):
+        raise ExtractionError("hwpx XML에 DTD/ENTITY 선언이 있다", code="corrupt")
     try:
         root = ET.fromstring(data)
     except ET.ParseError as e:
@@ -308,7 +385,7 @@ def _hwpx_xml_to_text(data: bytes) -> str:
         for child in e:
             name = _local(child.tag)
             if name == "p":
-                lines.append(_hwpx_inline_text(child))
+                lines.extend(_hwpx_paragraph_lines(child))
             elif name == "tbl":
                 lines.extend(_hwpx_table_lines(child))
             else:
@@ -322,21 +399,16 @@ def _extract_hwpx(path: Path, *, markers: bool = False) -> str:
     """HWPX(OPC zip)에서 Contents/section*.xml 본문을 뽑는다.
 
     - 섹션은 파일명 숫자 오름차순(section10은 section2 뒤).
-    - 항목 수 1,000개·해제 합 50MB 상한을 파싱 전에 검사한다.
+    - zip 상한(항목 수·해제 합·압축비)은 공용 _check_zip_safety 가 파싱 전에
+      검사한다(M13) — extract_text 진입점에서 호출된다.
     - 바이너리 .hwp는 여기서 다루지 않는다(unsupported).
     """
     import zipfile
 
     try:
         with zipfile.ZipFile(path) as zf:
-            infos = zf.infolist()
-            if len(infos) > _HWPX_MAX_ENTRIES:
-                raise ExtractionError(f"hwpx 항목 수 상한 초과({len(infos)}개)", code="corrupt")
-            total = sum(i.file_size for i in infos)
-            if total > _HWPX_MAX_UNCOMPRESSED:
-                raise ExtractionError(f"hwpx 해제 크기 상한 초과({total}B)", code="corrupt")
             sections: list[tuple[int, str]] = []
-            for info in infos:
+            for info in zf.infolist():
                 m = _HWPX_SECTION_RE.match(info.filename)
                 if m:
                     sections.append((int(m.group(1)), info.filename))
@@ -386,14 +458,18 @@ def extract_text(
         if len(text.strip()) < _MIN_CHARS:
             raise ExtractionError("이미지에서 텍스트를 인식하지 못함", code="empty_text")
     elif ext == ".docx":
+        _check_zip_safety(p)
         text = _extract_docx(p)
     elif ext == ".pptx":
+        _check_zip_safety(p)
         text = _extract_pptx(p, markers=markers)
     elif ext == ".xlsx":
+        _check_zip_safety(p)
         text = _extract_xlsx(p, max_rows=xlsx_max_rows, markers=markers)
     elif ext in (".html", ".htm"):
         text = _extract_html(p)
     elif ext == ".hwpx":
+        _check_zip_safety(p)
         text = _extract_hwpx(p, markers=markers)
     else:
         text = p.read_text(encoding="utf-8", errors="replace")

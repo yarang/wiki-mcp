@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 from hwpx_helper import make_hwpx, p, sec, t
 from kb_helper import future_now
@@ -164,3 +167,103 @@ class TestReadExtract:
         with pytest.raises(KBError) as ei:
             idx.read_extract("src-nope", "정산기준.hwpx")
         assert ei.value.code == "not_in_manifest"
+
+
+# ─── H4: 색인 최신성 — 서버가 떠 있는 채 CLI 가 바꾼 결과 반영 ────────
+class TestFreshness:
+    def test_search_reflects_scan_without_explicit_rebuild(self, indexed, source_dir):
+        idx, _, _ = indexed
+        assert idx.search("새 문서") == []
+        (source_dir / "새문서.md").write_text(
+            "# 새 문서\n\n방금 추가된 새 문서의 본문입니다.", encoding="utf-8"
+        )
+        import time as _t
+
+        old = _t.time() - 30
+        os.utime(source_dir / "새문서.md", (old, old))
+        scan_sources(idx.kb, now=future_now())
+        rels = [r["rel_path"] for r in idx.search("방금 추가된 새 문서")]
+        assert "새문서.md" in rels  # build() 재호출 없이 최신 반영
+
+    def test_search_reflects_remove_source(self, indexed):
+        from wiki_mcp.kb.sources import remove_source
+
+        idx, _, sid = indexed
+        assert idx.search("정산 기준")
+        remove_source(idx.kb, sid)
+        assert idx.search("정산 기준") == []  # 해제된 원본의 조각은 즉시 사라진다
+
+
+# ─── H8: 색인 총량 상한 ───────────────────────────────────────────────
+class TestIndexCap:
+    def test_cap_reports_truncated_files(self, kb, source_dir):
+        add_source(kb, source_dir)
+        for n in range(3):
+            (source_dir / f"big{n}.md").write_text(
+                f"# 문서 {n}\n\n" + ("내용이 가득 찬 문서 본문입니다. " * 200),
+                encoding="utf-8",
+            )
+        scan_sources(kb, now=future_now())
+        idx = SourceIndex(kb, max_index_chars=300)
+        out = idx.build()
+        assert out["chunks"] >= 1
+        assert idx.index_truncated  # 넘친 파일 목록이 보고된다
+        assert all(rel.endswith(".md") for rel in idx.index_truncated)
+
+
+# ─── M2: 2-gram 가드 ─────────────────────────────────────────────────
+class TestQueryGuard:
+    def test_unrelated_natural_query_returns_empty(self, indexed):
+        idx, _, _ = indexed
+        assert idx.search("오늘 날씨가 어떤지 알려 주세요") == []
+
+    def test_partial_bigram_overlap_not_enough(self, indexed):
+        """질의 2-gram 일부만 우연히 겹치는 질의는 결과를 주지 않는다."""
+        idx, _, _ = indexed
+        assert idx.search("날씨 처럼 정리된 기준표") == []
+
+    def test_stem_query_still_matches_inflected(self, indexed):
+        idx, _, _ = indexed
+        results = idx.search("기준")
+        assert "정산기준.hwpx" in [r["rel_path"] for r in results]
+
+
+# ─── M7: read_extract 검증 ───────────────────────────────────────────
+class TestReadExtractGuards:
+    def test_failed_entry_rejected_with_reason(self, kb, source_dir):
+        add_source(kb, source_dir)
+        (source_dir / "legacy.hwp").write_bytes(b"HWP")
+        scan_sources(kb, now=future_now())
+        idx = SourceIndex(kb)
+        idx.build()
+        sid = kb.load_sources()[0]["id"]
+        with pytest.raises(KBError) as ei:
+            idx.read_extract(sid, "legacy.hwp")
+        assert ei.value.code == "not_extracted"
+        assert "unsupported" in ei.value.message
+
+    def test_rel_path_separator_and_nfc_normalized(self, indexed):
+        idx, _, sid = indexed
+        out = idx.read_extract(sid, "정산기준.hwpx")  # 정상
+        assert out["length"] > 0
+        # 구분자·결합 형태가 달라도 같은 항목을 찾는다
+        out2 = idx.read_extract(sid, "정산기준.hwpx".replace("/", "\\"))
+        assert out2["rel_path"] == "정산기준.hwpx"
+
+
+# ─── M10: 원본 경로 조립에 fs_rel_path 사용 ──────────────────────────
+class TestOriginPath:
+    def test_origin_keeps_filesystem_spelling(self, kb, source_dir):
+        import unicodedata
+
+        add_source(kb, source_dir)
+        nfd = unicodedata.normalize("NFD", "한글문서.md")
+        (source_dir / nfd).write_text("NFD 파일명 문서의 본문입니다", encoding="utf-8")
+        scan_sources(kb, now=future_now())
+        idx = SourceIndex(kb)
+        idx.build()
+        results = idx.search("NFD 파일명")
+        assert results
+        origin = Path(results[0]["path"])
+        assert origin.name == nfd  # 파일시스템 표기 그대로
+        assert origin.exists()

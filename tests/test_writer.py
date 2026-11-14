@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from wiki_mcp.writer import (
@@ -353,3 +355,87 @@ class TestNoteLifecycle:
         add_link(idx, id="rag", target_id="embedding")  # rag → embedding
         r = delete_note(idx, id="embedding", confirm=True)
         assert "rag" in r["inbound_links_broken"]
+
+
+# ─── 경로 이탈 방지 (S2) ─────────────────────────────────────────────
+class TestPathEscape:
+    """domain/노트 경로로 wiki 밖에 쓰는 공격을 거부한다.
+
+    MCP 도구 입력은 LLM이 만들고 원본 문서 속 지시문에 속은 LLM이
+    domain="../.." 같은 값을 넣을 수 있다 — 쓰기 도구는 wiki 루트 안에만 쓴다.
+    """
+
+    def _seed(self, idx, graph, nid, **kw):
+        return create_note(
+            idx,
+            graph,
+            id=nid,
+            title=kw.get("title", nid),
+            body=kw.get("body", "본문"),
+            tags=kw.get("tags", []),
+            domain="llm",
+            links=kw.get("links"),
+        )
+
+    def test_create_note_domain_traversal_rejected(self, idx, graph, wiki, tmp_path):
+        outside = tmp_path / "outside-target"
+        outside.mkdir()
+        r = create_note(idx, graph, "escape", "제목", "본문", ["t"], domain="../../outside-target")
+        assert r["status"] == "error"
+        assert list(outside.iterdir()) == []
+
+    def test_create_note_domain_absolute_rejected(self, idx, graph, tmp_path):
+        r = create_note(idx, graph, "escape", "제목", "본문", ["t"], domain=str(tmp_path))
+        assert r["status"] == "error"
+        assert not (tmp_path / f"{tmp_path.name}.md").exists()
+
+    def test_create_note_domain_drive_letter_rejected(self, idx, graph):
+        r = create_note(idx, graph, "escape", "제목", "본문", ["t"], domain="C:\\ escape")
+        assert r["status"] == "error"
+
+    def test_create_note_domain_unc_rejected(self, idx, graph):
+        r = create_note(idx, graph, "escape", "제목", "본문", ["t"], domain="\\\\server\\share")
+        assert r["status"] == "error"
+
+    def test_create_note_domain_dot_segments_rejected(self, idx, graph):
+        r = create_note(idx, graph, "escape", "제목", "본문", ["t"], domain="ok/../../..")
+        assert r["status"] == "error"
+
+    def test_create_note_valid_domain_still_works(self, idx, graph, wiki):
+        r = create_note(idx, graph, "fine-note", "제목", "본문", ["t"], domain="research")
+        assert r["status"] == "ok"
+        assert "research" in r["relative_path"]
+        assert (wiki / "research" / "concepts" / "fine-note.md").exists()
+
+    @pytest.fixture
+    def linked_outside(self, idx, graph, wiki, tmp_path):
+        """wiki 안 노트가 wiki 밖 파일을 향한 symlink인 상태(색인 후)."""
+        outside = tmp_path / "secret.md"
+        outside.write_text(
+            '---\nid: linked\nsource_url: ""\ntags: []\n---\n\n바깥 본문', encoding="utf-8"
+        )
+        os.symlink(outside, wiki / "linked.md")
+        idx.build()  # symlink 노트를 색인에 올린다
+        assert "linked" in idx.notes
+        return outside
+
+    def test_update_note_symlink_escape_rejected(self, idx, graph, linked_outside):
+        before = linked_outside.read_text(encoding="utf-8")
+        r = update_note(idx, "linked", body="덮어쓰기 시도")
+        assert r["status"] == "error"
+        assert "wiki 밖" in r["error"]
+        assert linked_outside.read_text(encoding="utf-8") == before
+
+    def test_add_link_symlink_escape_rejected(self, idx, graph, linked_outside):
+        self._seed(idx, graph, "target-note")
+        before = linked_outside.read_text(encoding="utf-8")
+        r = add_link(idx, id="linked", target_id="target-note")
+        assert r["status"] == "error"
+        assert "wiki 밖" in r["error"]
+        assert linked_outside.read_text(encoding="utf-8") == before
+
+    def test_delete_note_symlink_escape_rejected(self, idx, graph, linked_outside):
+        r = delete_note(idx, "linked", confirm=True)
+        assert r["status"] == "error"
+        assert "wiki 밖" in r["error"]
+        assert linked_outside.exists()
