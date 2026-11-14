@@ -1,40 +1,57 @@
 """환경 변수 + 기본값."""
+
 import os
 from pathlib import Path
 
-# Package directory: .../tools/wiki-mcp/src/wiki_mcp/
+# Package directory: .../wiki-mcp/src/wiki_mcp/
 _PKG_DIR = Path(__file__).resolve().parent
 
-# Bundled skeleton ships in the source tree (NOT inside the installed package):
-#   src/wiki_mcp/ -> src/ -> tools/wiki-mcp/ -> examples/sample-wiki
+# Sample wiki ships in the source tree (NOT inside the installed package):
+#   src/wiki_mcp/ -> src/ -> examples/sample-wiki
 # Reachable for editable installs (`pip install -e .`) and git clones. For
 # regular pip installs the path resolves into site-packages and the user is
 # expected to set WIKI_PATH explicitly.
 _SAMPLE_WIKI = _PKG_DIR.parent.parent / "examples" / "sample-wiki"
 
+# ─── KB 모드 (0.3.0) ───────────────────────────────────────────────────
+# WIKI_KB_DIR가 정해지면 KB 모드: 원본 폴더를 그대로 둔 채 검색하는
+# 수업용 지식 기반. 비어 있으면 기존 동작(번들 호환)과 완전히 같다.
+# 주의: str(Path(""))는 "."이라 참으로 평가된다 — 켜짐 판정은 KB_ENABLED 로만.
+_env_kb = os.environ.get("WIKI_KB_DIR", "").strip()
+KB_ENABLED = bool(_env_kb)
+KB_DIR = Path(_env_kb).expanduser().resolve() if _env_kb else Path("")
+
+# KB 추출 결과 상한(문자) — 원문 하나가 색인을 잡아먹지 않게.
+KB_MAX_EXTRACT_CHARS = int(os.environ.get("WIKI_KB_MAX_EXTRACT_CHARS", "200000"))
+
 
 def _default_wiki_path() -> Path:
     """Pick a sensible default WIKI_PATH when the env var is unset.
 
-    Falls back to the bundled sample-wiki skeleton if present, else an empty
-    Path — the indexer will build an empty index and log a notice in that case.
+    KB 모드면 <KB>/wiki. Falls back to the repo's sample-wiki skeleton if
+    present (git clones), else an empty Path — the indexer will build an
+    empty index and log a notice in that case.
     """
+    if KB_ENABLED:
+        return (KB_DIR / "wiki").resolve()
     if _SAMPLE_WIKI.exists():
         return _SAMPLE_WIKI.resolve()
     return Path("")
 
 
-# @MX:NOTE: [AUTO] WIKI_PATH resolution order — explicit env var wins, then bundled sample-wiki
+# @MX:NOTE: [AUTO] WIKI_PATH resolution order — explicit env var wins, then KB wiki dir, then sample-wiki
 _env_wiki = os.environ.get("WIKI_PATH", "").strip()
 if _env_wiki:
     WIKI_PATH = Path(_env_wiki).expanduser().resolve()
 else:
     WIKI_PATH = _default_wiki_path()
 
-DATA_DIR = Path(os.environ.get(
-    "WIKI_DATA_DIR",
-    str(Path(__file__).parent.parent.parent / "data")
-)).expanduser().resolve()
+if KB_ENABLED:
+    _default_data = str(KB_DIR / ".kb" / "index")
+else:
+    # 기존 번들 기본값 — 소스 트리의 data/ (번들 경로가 없으면 그냥 쓰이지 않는다)
+    _default_data = str(_PKG_DIR.parent.parent.parent / "data")
+DATA_DIR = Path(os.environ.get("WIKI_DATA_DIR", _default_data)).expanduser().resolve()
 
 # 노트 템플릿 디렉토리 — 원하는 양식(frontmatter 필드 + 섹션 구조)을 .md 파일로 정의.
 # 기본: <wiki>/.templates (숨김 디렉토리 → 인덱서가 노트로 잡지 않도록 제외됨).
@@ -63,9 +80,7 @@ else:
 INGEST_ENABLED = os.environ.get("WIKI_INGEST_ENABLED", "").lower() in ("1", "true", "yes")
 
 # 생성 LLM 엔드포인트 — OpenAI 호환 chat completions (Open WebUI 기본 :8080).
-INGEST_URL = os.environ.get(
-    "WIKI_INGEST_URL", "http://localhost:8080/api/chat/completions"
-)
+INGEST_URL = os.environ.get("WIKI_INGEST_URL", "http://localhost:8080/api/chat/completions")
 INGEST_MODEL = os.environ.get("WIKI_INGEST_MODEL", "").strip()
 INGEST_API_KEY = os.environ.get("WIKI_INGEST_API_KEY", "").strip()
 INGEST_TIMEOUT = int(os.environ.get("WIKI_INGEST_TIMEOUT", "120"))
@@ -96,14 +111,10 @@ INGEST_XLSX_MAX_ROWS = int(os.environ.get("WIKI_INGEST_XLSX_MAX_ROWS", "200"))
 
 # OCR — 스캔/이미지 PDF 및 이미지 파일 처리 (Apple Vision, 오프라인).
 # 텍스트 추출이 빈약한 PDF에 자동 폴백. 바이너리가 없으면 조용히 건너뜀.
+# 0.3.0부터 OCR 바이너리 경로는 환경 변수로만 받는다(번들 폴더 구조 가정 제거).
 INGEST_OCR = os.environ.get("WIKI_INGEST_OCR", "1").lower() in ("1", "true", "yes")
-_BUNDLE_ROOT = _PKG_DIR.parent.parent.parent  # openwebui/wiki-mcp/src/wiki_mcp → openwebui
 _env_ocr_bin = os.environ.get("WIKI_INGEST_OCR_BIN", "").strip()
-INGEST_OCR_BIN = (
-    Path(_env_ocr_bin).expanduser()
-    if _env_ocr_bin
-    else _BUNDLE_ROOT / "ocr" / "vision-ocr"
-)
+INGEST_OCR_BIN = Path(_env_ocr_bin).expanduser() if _env_ocr_bin else Path("")
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "bge-m3")

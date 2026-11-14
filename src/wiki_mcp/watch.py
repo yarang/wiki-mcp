@@ -5,19 +5,26 @@ Chroma 는 프로세스마다 HNSW 를 메모리에 두므로 여기서 쓴 벡�
 보이지 않았다. 임베딩은 mcpo 가 띄운 wiki-mcp 가 노트 파일 변경을 보고 스스로 한다
 (autoindex). 여기 인덱스는 raw 변환 때 중복 id 확인과 링크 후보(BM25)에만 쓴다.
 """
+
 from __future__ import annotations
 
 import sys
 import time
 from pathlib import Path
 
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
 from wiki_mcp import config
 from wiki_mcp.config import DATA_DIR, EMBEDDING_MODEL, OLLAMA_URL, WIKI_PATH
 from wiki_mcp.graph import WikiGraph
 from wiki_mcp.indexer import WikiIndexer
-from wiki_mcp.ingest import ingest_file, is_ingestable, iter_raw_files, openai_chat_complete
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
+from wiki_mcp.ingest import (
+    ingest_file,
+    is_ingestable,
+    iter_raw_files,
+    openai_chat_complete,
+)
 
 
 class ReindexHandler(FileSystemEventHandler):
@@ -85,7 +92,9 @@ class RawIngestHandler(FileSystemEventHandler):
         # 원문 이동 시 하위 폴더 구조를 보존한다 (raw/a/b.md → .processed/a/b.md)
         sub = rel.parent
         result = ingest_file(
-            self.idx, self.graph, p,
+            self.idx,
+            self.graph,
+            p,
             complete_fn=self.complete_fn,
             template=(config.INGEST_TEMPLATE or None),
             template_dir=config.TEMPLATE_DIR,
@@ -100,9 +109,15 @@ class RawIngestHandler(FileSystemEventHandler):
         )
         if result.get("status") == "ok":
             if "created" in result:  # 긴 문서 → 다중 노트
-                print(f"✅ {len(result['created'])}개 노트 생성: {', '.join(result['created'])}", file=sys.stderr)
+                print(
+                    f"✅ {len(result['created'])}개 노트 생성: {', '.join(result['created'])}",
+                    file=sys.stderr,
+                )
             else:
-                print(f"✅ 노트 생성: {result.get('id')} → {result.get('relative_path')}", file=sys.stderr)
+                print(
+                    f"✅ 노트 생성: {result.get('id')} → {result.get('relative_path')}",
+                    file=sys.stderr,
+                )
         else:
             print(f"❌ 변환 실패({rel}): {result.get('error')}", file=sys.stderr)
 

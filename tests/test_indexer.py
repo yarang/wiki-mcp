@@ -3,9 +3,12 @@
 임베딩 서버가 꺼진 채 처음 인덱싱한 뒤 서버가 켜져도 Hybrid 검색이 빈 dense 인덱스로
 BM25 결과만 돌려주던 회귀를 막는다. ChromaDB 는 tmp 디렉토리에 실제로 띄우고 _embed 만 스텁.
 """
+
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import frontmatter
@@ -14,6 +17,11 @@ import pytest
 from wiki_mcp.indexer import WikiIndexer, tokenize
 
 IDS = ("rag", "embedding")
+
+requires_chroma = pytest.mark.skipif(
+    importlib.util.find_spec("chromadb") is None,
+    reason="chromadb 미설치 — [embed] extra 필요",
+)
 
 
 def _up(text: str) -> list[float]:
@@ -35,6 +43,7 @@ def ix(tmp_path: Path, wiki: Path) -> WikiIndexer:
     return indexer
 
 
+@requires_chroma
 class TestEmbedRetry:
     def test_failed_notes_are_retried(self, ix, monkeypatch):
         monkeypatch.setattr(ix, "_embed", _down)
@@ -61,9 +70,7 @@ class TestEmbedRetry:
 
     def test_cache_without_stored_embeddings_heals(self, ix, wiki, monkeypatch):
         # 0.2.0 은 임베딩에 실패한 노트도 캐시에 적었다: 해시는 맞는데 저장소는 비어 있는 상태.
-        cache = {
-            nid: ix._content_hash(frontmatter.load(wiki / f"{nid}.md").content) for nid in IDS
-        }
+        cache = {nid: ix._content_hash(frontmatter.load(wiki / f"{nid}.md").content) for nid in IDS}
         (ix.data_dir / "index_cache.json").write_text(json.dumps(cache), encoding="utf-8")
 
         monkeypatch.setattr(ix, "_embed", _up)
@@ -81,6 +88,7 @@ def _reopen(ix: WikiIndexer, model: str) -> WikiIndexer:
     return indexer
 
 
+@requires_chroma
 class TestEmbeddingModelChange:
     """임베딩 모델(차원)이 바뀌면 저장소를 새로 만든다 — 옛 벡터가 남으면 dense 검색이 조용히 꺼진다."""
 
@@ -129,7 +137,9 @@ class TestStorelessIndexer:
     """store=False (watch 용) — 벡터 저장소와 임베딩 캐시는 mcpo 쪽 인덱서 하나만 쓴다."""
 
     def test_does_not_touch_store_or_cache(self, wiki, tmp_path):
-        (wiki / "rag.md").write_text("---\nid: rag\ntitle: rag\n---\n검색 증강 생성\n", encoding="utf-8")
+        (wiki / "rag.md").write_text(
+            "---\nid: rag\ntitle: rag\n---\n검색 증강 생성\n", encoding="utf-8"
+        )
         data = tmp_path / "data"
         indexer = WikiIndexer(wiki, data, store=False)
         indexer.embedding_disabled = False  # 저장소가 없으면 임베딩 설정과 무관하게 BM25 전용
@@ -142,7 +152,9 @@ class TestStorelessIndexer:
 
 
 def _note_md(wiki: Path, nid: str, body: str) -> None:
-    (wiki / f"{nid}.md").write_text(f"---\nid: {nid}\ntitle: {nid}\n---\n{body}\n", encoding="utf-8")
+    (wiki / f"{nid}.md").write_text(
+        f"---\nid: {nid}\ntitle: {nid}\n---\n{body}\n", encoding="utf-8"
+    )
 
 
 class TestZeroScoreBm25:
@@ -154,13 +166,16 @@ class TestZeroScoreBm25:
 
     QUERY = "회사 노트북을 밖으로 들고 나가려면 누구 허락이 필요해?"
 
+    @requires_chroma
     def test_dense_top_wins_when_no_token_overlaps(self, wiki, tmp_path, monkeypatch):
         for i in range(8):
             _note_md(wiki, f"filler-{i}", f"서비스 모니터링 절차 {i}")
         _note_md(wiki, "removal-policy", "노트북 반출은 부서장 승인 후 가능")
         indexer = WikiIndexer(wiki, tmp_path / "data")
         indexer.embedding_disabled = False
-        monkeypatch.setattr(indexer, "_embed", lambda t: [1.0, 0.0, 0.1] if "노트북" in t else [0.0, 1.0, 0.1])
+        monkeypatch.setattr(
+            indexer, "_embed", lambda t: [1.0, 0.0, 0.1] if "노트북" in t else [0.0, 1.0, 0.1]
+        )
         indexer.build(verbose=False)
         assert not any(indexer.bm25.get_scores(tokenize(self.QUERY)))
 
@@ -174,3 +189,85 @@ class TestZeroScoreBm25:
 
         assert [r["id"] for r in indexer.search_hybrid("검색")] == ["rag"]
         assert indexer.search_hybrid(self.QUERY) == []
+
+
+# ─── 한국어 2-gram (0.3.0) ────────────────────────────────────────────
+class TestKoreanBigram:
+    """한글 연속 구간에서 글자 2-gram을 원 토큰과 함께 추가한다.
+
+    "기준"으로 검색하면 "기준을"이 든 노트를 못 찾던 한국어 검색 누락(knowledge-base.md 3장)을
+    조사가 붙은 표기에서도 겹치게 만든다. 영어·숫자·[[id]] 처리는 그대로.
+    """
+
+    def test_bigram_added_to_hangul_token(self):
+        # 예시 계약: "기준을" → "기준을", "기준", "준을"
+        assert tokenize("기준을") == ["기준을", "기준", "준을"]
+
+    def test_single_hangul_char_token_kept_without_bigram(self):
+        assert tokenize("산") == ["산"]
+
+    def test_two_char_hangul_token_has_no_extra_bigram(self):
+        assert tokenize("기준") == ["기준"]
+
+    def test_english_untouched(self):
+        assert tokenize("RAG pipeline v2") == ["rag", "pipeline", "v2"]
+
+    def test_id_link_token_untouched(self):
+        assert tokenize("[[mcp-server]]") == ["[[mcp-server]]"]
+
+    def test_mixed_tokens(self):
+        toks = tokenize("기준을 RAG")
+        assert "기준을" in toks and "기준" in toks and "준을" in toks and "rag" in toks
+
+    def test_inflected_word_found_by_bare_stem(self, wiki, tmp_path):
+        _note_md(wiki, "policy", "출장비 정산 기준을 회의에서 변경했다")
+        indexer = WikiIndexer(wiki, tmp_path / "data", store=False)
+        indexer.build(verbose=False)
+
+        assert [r["id"] for r in indexer.search_hybrid("기준")] == ["policy"]
+
+    def test_inflected_query_matches_bare_doc(self, wiki, tmp_path):
+        _note_md(wiki, "policy", "출장비 정산 기준")
+        indexer = WikiIndexer(wiki, tmp_path / "data", store=False)
+        indexer.build(verbose=False)
+
+        assert [r["id"] for r in indexer.search_hybrid("기준을")] == ["policy"]
+
+    def test_query_token_gate_still_holds_with_bigram(self, wiki, tmp_path):
+        """질의 토큰과 하나도 겹치지 않는 노트는 2-gram이 있어도 표를 받지 않는다."""
+        _note_md(wiki, "rag", "검색 증강 생성")
+        _note_md(wiki, "monitoring", "서비스 모니터링 절차")
+        indexer = WikiIndexer(wiki, tmp_path / "data", store=False)
+        indexer.build(verbose=False)
+
+        assert indexer.search_hybrid("파티션 나누기") == []
+        assert [r["id"] for r in indexer.search_hybrid("모니터링 절차")] == ["monitoring"]
+
+
+# ─── chromadb 선택 의존성 (0.3.0) ────────────────────────────────────
+class TestChromaOptional:
+    """chromadb가 없으면 store=True 인덱서도 조용히 BM25 전용으로 동작한다."""
+
+    def test_store_indexer_degrades_to_bm25(self, wiki, tmp_path, monkeypatch, capsys):
+        _note_md(wiki, "rag", "검색 증강 생성")
+        # sys.modules에 None을 심으면 import chromadb가 ImportError를 낸다
+        monkeypatch.setitem(sys.modules, "chromadb", None)
+        monkeypatch.setattr("wiki_mcp.indexer._CHROMA_RESOLVED", False)
+
+        indexer = WikiIndexer(wiki, tmp_path / "data")
+        indexer.build(verbose=False)
+
+        assert indexer.collection is None
+        assert not indexer.dense
+        assert [r["id"] for r in indexer.search_hybrid("검색")] == ["rag"]
+        err = capsys.readouterr().err
+        assert "BM25 전용" in err
+        assert "wiki-mcp[embed]" in err
+
+    def test_missing_chroma_notice_printed_once(self, wiki, tmp_path, monkeypatch, capsys):
+        monkeypatch.setitem(sys.modules, "chromadb", None)
+        monkeypatch.setattr("wiki_mcp.indexer._CHROMA_RESOLVED", False)
+        WikiIndexer(wiki, tmp_path / "a")
+        WikiIndexer(wiki, tmp_path / "b")
+        err = capsys.readouterr().err
+        assert err.count("BM25 전용") == 1

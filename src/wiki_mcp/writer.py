@@ -3,6 +3,7 @@
 순수 헬퍼 함수들 — MCP tool이 아님. server.py의 tool 래퍼가 호출함.
 모든 함수는 사용자 친화적 에러 dict를 반환 (예외 발생 X).
 """
+
 from __future__ import annotations
 
 import re
@@ -53,9 +54,16 @@ def validate_note_id(id_str: str) -> str:
 
 
 # 표준 frontmatter 필드 — 템플릿의 extra 필드 판별에 사용
-STANDARD_FM_KEYS = frozenset({
-    "id", "title", "source_url", "tags", "created_at", "last_updated",
-})
+STANDARD_FM_KEYS = frozenset(
+    {
+        "id",
+        "title",
+        "source_url",
+        "tags",
+        "created_at",
+        "last_updated",
+    }
+)
 
 
 def _format_fm_value(value: Any) -> str:
@@ -218,10 +226,7 @@ def _similar_ids(idx, query_id: str, limit: int = 5) -> list[str]:
     if not all_ids:
         return []
     fuzzy = get_close_matches(query_id, all_ids, n=limit, cutoff=0.6)
-    substring = [
-        nid for nid in all_ids
-        if query_id in nid or nid in query_id
-    ]
+    substring = [nid for nid in all_ids if query_id in nid or nid in query_id]
     # merge unique preserving order
     seen: set[str] = set()
     result: list[str] = []
@@ -291,8 +296,7 @@ def create_note(
     similar = _similar_ids(idx, clean_id)
     if similar:
         warnings.append(
-            f"비슷한 기존 ID (오타 확인 권장): "
-            f"{', '.join(f'[[{s}]]' for s in similar)}"
+            f"비슷한 기존 ID (오타 확인 권장): {', '.join(f'[[{s}]]' for s in similar)}"
         )
 
     # 4. 경로 결정
@@ -305,15 +309,8 @@ def create_note(
         except Exception:
             related = []
         if related:
-            domains = [
-                graph.domain_of(r["id"])
-                for r in related[:3]
-                if r["id"] in idx.notes
-            ]
-            top_domain = (
-                max(set(domains), key=domains.count)
-                if domains else "concepts"
-            )
+            domains = [graph.domain_of(r["id"]) for r in related[:3] if r["id"] in idx.notes]
+            top_domain = max(set(domains), key=domains.count) if domains else "concepts"
         else:
             top_domain = "concepts"
     rel_path = _build_note_path(top_domain, clean_id)
@@ -357,9 +354,7 @@ def create_note(
             display = idx.notes[target_clean].get("title", target_clean)
             link_lines.append(f"- [[{target_clean}|{display}]]")
         else:
-            warnings.append(
-                f"링크 대상 [[{target_clean}]] 현재 wiki에 없음 (broken link 됨)"
-            )
+            warnings.append(f"링크 대상 [[{target_clean}]] 현재 wiki에 없음 (broken link 됨)")
             link_lines.append(f"- [[{target_clean}]]")
     link_bullets = "\n".join(link_lines)
 
@@ -388,8 +383,7 @@ def create_note(
 
     # 플레이스홀더 치환 (frontmatter extra 값 + 본문 공통)
     content = (
-        content
-        .replace("{{id}}", clean_id)
+        content.replace("{{id}}", clean_id)
         .replace("{{title}}", title or clean_id)
         .replace("{{date}}", today)
         .replace("{{tags}}", ", ".join(tags))
@@ -403,9 +397,7 @@ def create_note(
             "path": str(abs_path),
             "relative_path": rel_path,
             "warnings": warnings,
-            "content_preview": (
-                content[:1000] + "..." if len(content) > 1000 else content
-            ),
+            "content_preview": (content[:1000] + "..." if len(content) > 1000 else content),
         }
 
     # 7. 실제 쓰기
@@ -463,9 +455,7 @@ def update_note(
     if not abs_path or not abs_path.exists():
         return {
             "status": "error",
-            "error": (
-                f"노트 [[{clean_id}]] 인덱스에 있으나 파일 없음 (path: {abs_path})"
-            ),
+            "error": (f"노트 [[{clean_id}]] 인덱스에 있으나 파일 없음 (path: {abs_path})"),
         }
 
     # 2. frontmatter 파싱
@@ -526,8 +516,7 @@ def update_note(
             "path": str(abs_path),
             "changes": changes,
             "content_preview": (
-                new_content[:1000] + "..."
-                if len(new_content) > 1000 else new_content
+                new_content[:1000] + "..." if len(new_content) > 1000 else new_content
             ),
         }
 
@@ -575,10 +564,7 @@ def add_link(
         suggestions = _similar_ids(idx, tgt_id)
         return {
             "status": "error",
-            "error": (
-                f"대상 노트 [[{tgt_id}]] 없음 — 링크 생성 거부 "
-                f"(broken link 사전 방지)"
-            ),
+            "error": (f"대상 노트 [[{tgt_id}]] 없음 — 링크 생성 거부 (broken link 사전 방지)"),
             "suggestions": suggestions,
         }
 
@@ -618,16 +604,12 @@ def add_link(
         next_header_match = re.search(r"\n## ", text[after_header:])
         if next_header_match:
             insert_offset = after_header + next_header_match.start()
-            new_text = (
-                text[:insert_offset] + link_line + "\n" + text[insert_offset:]
-            )
+            new_text = text[:insert_offset] + link_line + "\n" + text[insert_offset:]
         else:
             new_text = text.rstrip() + "\n" + link_line + "\n"
     else:
         # 섹션 없음 — 끝에 새 섹션 추가
-        new_text = (
-            text.rstrip() + "\n\n" + section_header + "\n\n" + link_line + "\n"
-        )
+        new_text = text.rstrip() + "\n\n" + section_header + "\n\n" + link_line + "\n"
 
     if dry_run:
         return {
@@ -674,10 +656,7 @@ def delete_note(
     if not confirm:
         return {
             "status": "error",
-            "error": (
-                "confirmation required — confirm=True 설정 필요 "
-                "(삭제는 되돌릴 수 없음)"
-            ),
+            "error": ("confirmation required — confirm=True 설정 필요 (삭제는 되돌릴 수 없음)"),
             "id": clean_id,
             "hint": "백업은 자동 생성되지만, dry_run=True로 미리보기 먼저 권장",
         }
@@ -692,9 +671,7 @@ def delete_note(
     if not abs_path or not abs_path.exists():
         return {
             "status": "error",
-            "error": (
-                f"노트 [[{clean_id}]] 인덱스에 있으나 파일 없음: {abs_path}"
-            ),
+            "error": (f"노트 [[{clean_id}]] 인덱스에 있으나 파일 없음: {abs_path}"),
         }
 
     # 3. inbound link 사전 캡처 (삭제 후 broken 될 소스들)

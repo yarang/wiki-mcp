@@ -3,6 +3,7 @@
 문서 추출 라이브러리(openpyxl/pptx/bs4 등)가 설치돼 있으면 실제 추출을 검증하고,
 없으면 해당 테스트는 skip한다(오프라인 번들에는 모두 포함됨).
 """
+
 from __future__ import annotations
 
 import importlib.util

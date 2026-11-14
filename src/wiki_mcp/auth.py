@@ -3,6 +3,7 @@
 FastMCP의 `streamable_http_app()`이 반환하는 Starlette app 위에
 `Authorization: Bearer <key>` 검증을 얹는다. stdio / MCPO 경로에는 영향 없음.
 """
+
 from __future__ import annotations
 
 import sys
@@ -26,7 +27,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 {"error": "missing or invalid Authorization header (expected 'Bearer <key>')"},
                 status_code=401,
             )
-        token = auth[len("Bearer "):].strip()
+        token = auth[len("Bearer ") :].strip()
         # constant-time 비교로 타이밍 공격 완화
         from hmac import compare_digest
 

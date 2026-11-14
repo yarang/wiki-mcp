@@ -1,4 +1,5 @@
 """Wiki [[id]] link graph 분석."""
+
 from __future__ import annotations
 
 from collections import deque
@@ -19,10 +20,7 @@ class WikiGraph:
             nid, d = frontier.popleft()
             if d >= depth:
                 continue
-            related = (
-                self.idx.out_links.get(nid, set())
-                | self.idx.in_links.get(nid, set())
-            )
+            related = self.idx.out_links.get(nid, set()) | self.idx.in_links.get(nid, set())
             for target in related:
                 if target in visited or target not in self.idx.notes:
                     continue
@@ -57,9 +55,7 @@ class WikiGraph:
 
     def top_hubs(self, limit: int = 10) -> list[tuple[str, int]]:
         scored = [
-            (nid, len(refs))
-            for nid, refs in self.idx.in_links.items()
-            if nid in self.idx.notes
+            (nid, len(refs)) for nid, refs in self.idx.in_links.items() if nid in self.idx.notes
         ]
         scored.sort(key=lambda x: -x[1])
         return scored[:limit]

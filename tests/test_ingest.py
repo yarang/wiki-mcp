@@ -1,9 +1,11 @@
 """ingest.py characterization 테스트 — JSON 방어·청킹·재귀 스캔·주입 LLM 인제스트."""
+
 from __future__ import annotations
 
 import json
 
 import pytest
+from conftest import echo_note
 
 from wiki_mcp.ingest import (
     build_prompts,
@@ -20,8 +22,6 @@ from wiki_mcp.ingest import (
     template_section_headings,
     validate_evidence,
 )
-
-from conftest import echo_note
 
 
 # ─── parse_note_json (코드펜스/설명문 방어) ──────────────────────────
@@ -77,9 +77,7 @@ class TestRelatedCandidates:
         assert candidates[0]["title"] == "관련 문서"
 
     def test_filters_links_outside_allowlist(self):
-        accepted, rejected = filter_allowed_links(
-            ["related", "invented", "related"], {"related"}
-        )
+        accepted, rejected = filter_allowed_links(["related", "invented", "related"], {"related"})
         assert accepted == ["related"]
         assert rejected == ["invented"]
 
@@ -234,10 +232,15 @@ class TestIngestText:
         )
         idx.build()
         idx.search_results = [{"id": "related", "title": "관련 노트", "tags": ["rag"]}]
-        fn = echo_note({
-            "id": "new-note", "title": "새 노트", "body": "본문", "tags": ["rag"],
-            "links": ["related", "invented-note"],
-        })
+        fn = echo_note(
+            {
+                "id": "new-note",
+                "title": "새 노트",
+                "body": "본문",
+                "tags": ["rag"],
+                "links": ["related", "invented-note"],
+            }
+        )
 
         r = ingest_text(idx, graph, "RAG 관련 원문", complete_fn=fn)
 
@@ -254,10 +257,14 @@ class TestLongIngest:
 
         def fn(system, user):
             if "나누는 편집자" in system:  # 아웃라인 단계
-                return json.dumps({"notes": [
-                    {"id": "concept-a", "title": "A", "scope": "A"},
-                    {"id": "concept-b", "title": "B", "scope": "B"},
-                ]})
+                return json.dumps(
+                    {
+                        "notes": [
+                            {"id": "concept-a", "title": "A", "scope": "A"},
+                            {"id": "concept-b", "title": "B", "scope": "B"},
+                        ]
+                    }
+                )
             # 본문 작성 단계
             return json.dumps({"tags": ["t"], "links": [], "body": "본문"})
 
@@ -288,10 +295,14 @@ class TestLongIngest:
 
         def fn(system, user):
             counter["n"] += 1
-            return json.dumps({"notes": [
-                {"id": f"n{counter['n']}-a", "title": "A", "scope": "x"},
-                {"id": f"n{counter['n']}-b", "title": "B", "scope": "x"},
-            ]})
+            return json.dumps(
+                {
+                    "notes": [
+                        {"id": f"n{counter['n']}-a", "title": "A", "scope": "x"},
+                        {"id": f"n{counter['n']}-b", "title": "B", "scope": "x"},
+                    ]
+                }
+            )
 
         planned, _ = outline_document(text, [], fn, max_chars=120, max_notes=3)
         assert len(planned) <= 3
@@ -352,8 +363,7 @@ class TestPromptRules:
             captured["write"] = system
             return json.dumps({"tags": ["t"], "links": [], "body": "b"})
 
-        ingest_long_text(idx, graph, "## 개념\n" + ("본문 " * 40),
-                         complete_fn=fn, max_chars=100)
+        ingest_long_text(idx, graph, "## 개념\n" + ("본문 " * 40), complete_fn=fn, max_chars=100)
         assert "id를 tags에 넣지 마라" in captured["write"]
 
     def test_write_prompt_scopes_to_single_topic(self, idx, graph):
@@ -361,14 +371,17 @@ class TestPromptRules:
 
         def fn(system, user):
             if "나누는 편집자" in system:
-                return json.dumps({"notes": [
-                    {"id": "a", "title": "A제목", "scope": "A범위"},
-                ]})
+                return json.dumps(
+                    {
+                        "notes": [
+                            {"id": "a", "title": "A제목", "scope": "A범위"},
+                        ]
+                    }
+                )
             captured["write"] = system
             return json.dumps({"tags": ["t"], "links": [], "body": "b"})
 
-        ingest_long_text(idx, graph, "## 개념\n" + ("본문 " * 40),
-                         complete_fn=fn, max_chars=100)
+        ingest_long_text(idx, graph, "## 개념\n" + ("본문 " * 40), complete_fn=fn, max_chars=100)
         assert "이 주제만 다루고 다른 주제는 제외한다" in captured["write"]
         assert "A범위" in captured["write"]  # scope가 작성 프롬프트로 전달됨
 
@@ -384,13 +397,17 @@ class TestIngestFile:
         raw = tmp_path / "a.md"
         raw.write_text("충분히 긴 원문 내용입니다. 노트로 변환됩니다.", encoding="utf-8")
         processed, failed = self._dirs(tmp_path)
-        fn = echo_note({
-            "id": "rag", "title": "RAG", "body": "본문", "tags": ["llm"],
-            "evidence": ["충분히 긴 원문 내용입니다."],
-        })
+        fn = echo_note(
+            {
+                "id": "rag",
+                "title": "RAG",
+                "body": "본문",
+                "tags": ["llm"],
+                "evidence": ["충분히 긴 원문 내용입니다."],
+            }
+        )
 
-        r = ingest_file(idx, graph, raw, complete_fn=fn,
-                        processed_dir=processed, failed_dir=failed)
+        r = ingest_file(idx, graph, raw, complete_fn=fn, processed_dir=processed, failed_dir=failed)
         assert r["status"] == "ok"
         assert not raw.exists()
         assert (processed / "a.md").exists()
@@ -407,8 +424,7 @@ class TestIngestFile:
         def fn(system, user):
             return "JSON 아님 — 파싱 실패 유도"
 
-        r = ingest_file(idx, graph, raw, complete_fn=fn,
-                        processed_dir=processed, failed_dir=failed)
+        r = ingest_file(idx, graph, raw, complete_fn=fn, processed_dir=processed, failed_dir=failed)
         assert r["status"] == "error"
         assert not raw.exists()
         assert (failed / "a.md").exists()
@@ -419,8 +435,7 @@ class TestIngestFile:
         processed, failed = self._dirs(tmp_path)
         fn = echo_note({"id": "x", "title": "X", "body": "b"})
 
-        r = ingest_file(idx, graph, raw, complete_fn=fn,
-                        processed_dir=processed, failed_dir=failed)
+        r = ingest_file(idx, graph, raw, complete_fn=fn, processed_dir=processed, failed_dir=failed)
         assert r["status"] == "error"
         assert "빈 파일" in r["error"]
         assert (failed / "empty.md").exists()
@@ -431,31 +446,49 @@ class TestIngestFile:
         processed, failed = self._dirs(tmp_path)
         fn = echo_note({"id": "x", "title": "X", "body": "b"})
 
-        r = ingest_file(idx, graph, raw, complete_fn=fn, ocr=False,
-                        processed_dir=processed, failed_dir=failed)
+        r = ingest_file(
+            idx, graph, raw, complete_fn=fn, ocr=False, processed_dir=processed, failed_dir=failed
+        )
         assert r["status"] == "error"
         assert "추출 실패" in r["error"]
         assert (failed / "scan.png").exists()
 
     def test_long_text_routes_to_multi_note(self, idx, graph, tmp_path):
         raw = tmp_path / "long.md"
-        raw.write_text("\n".join(f"## 개념{i}\n" + ("설명 " * 40) for i in range(3)),
-                       encoding="utf-8")
+        raw.write_text(
+            "\n".join(f"## 개념{i}\n" + ("설명 " * 40) for i in range(3)), encoding="utf-8"
+        )
         processed, failed = self._dirs(tmp_path)
 
         def fn(system, user):
             if "나누는 편집자" in system:
-                return json.dumps({"notes": [
-                    {"id": "c-a", "title": "A", "scope": "A"},
-                    {"id": "c-b", "title": "B", "scope": "B"},
-                ]})
-            return json.dumps({
-                "tags": ["t"], "links": [], "body": "본문",
-                "evidence": ["설명 설명 설명 설명"],
-            })
+                return json.dumps(
+                    {
+                        "notes": [
+                            {"id": "c-a", "title": "A", "scope": "A"},
+                            {"id": "c-b", "title": "B", "scope": "B"},
+                        ]
+                    }
+                )
+            return json.dumps(
+                {
+                    "tags": ["t"],
+                    "links": [],
+                    "body": "본문",
+                    "evidence": ["설명 설명 설명 설명"],
+                }
+            )
 
-        r = ingest_file(idx, graph, raw, complete_fn=fn, max_chars=200, max_notes=10,
-                        processed_dir=processed, failed_dir=failed)
+        r = ingest_file(
+            idx,
+            graph,
+            raw,
+            complete_fn=fn,
+            max_chars=200,
+            max_notes=10,
+            processed_dir=processed,
+            failed_dir=failed,
+        )
         assert r["status"] == "ok"
         assert set(r["created"]) == {"c-a", "c-b"}
         assert (processed / "long.md").exists()
@@ -463,10 +496,14 @@ class TestIngestFile:
     def test_short_text_routes_to_single_note(self, idx, graph, tmp_path):
         raw = tmp_path / "short.md"
         raw.write_text("짧은 원문 내용입니다. 노트 하나면 충분합니다.", encoding="utf-8")
-        fn = echo_note({
-            "id": "single", "title": "S", "body": "본문",
-            "evidence": ["짧은 원문 내용입니다."],
-        })
+        fn = echo_note(
+            {
+                "id": "single",
+                "title": "S",
+                "body": "본문",
+                "evidence": ["짧은 원문 내용입니다."],
+            }
+        )
 
         r = ingest_file(idx, graph, raw, complete_fn=fn, max_chars=6000)
         assert r["status"] == "ok"
@@ -476,10 +513,14 @@ class TestIngestFile:
     def test_no_dest_dirs_leaves_raw_in_place(self, idx, graph, tmp_path):
         raw = tmp_path / "a.md"
         raw.write_text("충분히 긴 원문 내용입니다. 이동 없이 유지.", encoding="utf-8")
-        fn = echo_note({
-            "id": "rag", "title": "RAG", "body": "본문",
-            "evidence": ["충분히 긴 원문 내용입니다."],
-        })
+        fn = echo_note(
+            {
+                "id": "rag",
+                "title": "RAG",
+                "body": "본문",
+                "evidence": ["충분히 긴 원문 내용입니다."],
+            }
+        )
 
         r = ingest_file(idx, graph, raw, complete_fn=fn)
         assert r["status"] == "ok"
@@ -488,10 +529,14 @@ class TestIngestFile:
     def test_hallucinated_evidence_rejects_derived_but_preserves_source(self, idx, graph, tmp_path):
         raw = tmp_path / "accuracy.md"
         raw.write_text("검증 가능한 실제 원문 내용입니다.", encoding="utf-8")
-        fn = echo_note({
-            "id": "invented", "title": "임의 작성", "body": "원문 밖 주장",
-            "evidence": ["원문에는 존재하지 않는 조작된 근거입니다."],
-        })
+        fn = echo_note(
+            {
+                "id": "invented",
+                "title": "임의 작성",
+                "body": "원문 밖 주장",
+                "evidence": ["원문에는 존재하지 않는 조작된 근거입니다."],
+            }
+        )
 
         r = ingest_file(idx, graph, raw, complete_fn=fn)
 

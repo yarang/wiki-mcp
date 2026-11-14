@@ -1,4 +1,5 @@
 """Wiki 노트 인덱싱 — Hybrid (BM25 + dense embedding)."""
+
 from __future__ import annotations
 
 import hashlib
@@ -8,23 +9,67 @@ import sys
 import threading
 from pathlib import Path
 
-import chromadb
 import frontmatter
 import requests
-from chromadb.config import Settings
 from rank_bm25 import BM25Okapi
 
 from wiki_mcp.config import EMBEDDING_API_KEY, EMBEDDING_DISABLED, EMBEDDING_PROVIDER
 
-
 # ─── 토크나이저 ─────────────────────────────────────────────────
 _TOKEN_RE = re.compile(r"\[\[[\w\-\.]+\]\]|[\w가-힣]+")
 _LINK_RE = re.compile(r"\[\[([^\]|\\]+?)(?:\\?\|[^\]]*)?\]\]")
+# 한글 연속 구간 — 조사가 붙은 표기("기준을")에서 어간("기준")이 겹치게 하는 2-gram용
+_HANGUL_RUN_RE = re.compile(r"[가-힣]+")
 
 
 def tokenize(text: str) -> list[str]:
-    """한국어 + 영어 + `[[id]]` 동시 처리."""
-    return _TOKEN_RE.findall(text.lower())
+    """한국어 + 영어 + `[[id]]` 동시 처리.
+
+    한글 연속 구간은 글자 2-gram을 원 토큰과 함께 추가한다("기준을" →
+    "기준을", "기준", "준을"). 한국어는 조사 때문에 질의와 본문이 한 토큰도
+    겹치지 않는 일이 잦아, 어간 검색("기준")이 활용("기준을")을 찾지 못했다.
+    한 글자 한글 토큰도 그대로 유지하고 영어·숫자·`[[id]]` 처리는 바꾸지 않는다.
+    """
+    tokens = _TOKEN_RE.findall(text.lower())
+    out: list[str] = []
+    for tok in tokens:
+        out.append(tok)
+        for run in _HANGUL_RUN_RE.findall(tok):
+            for i in range(len(run) - 1):
+                bigram = run[i : i + 2]
+                # 2글자 한글 토큰의 2-gram은 원 토큰과 같으니 중복해 넣지 않는다
+                if bigram != tok:
+                    out.append(bigram)
+    return out
+
+
+# ─── chromadb 지연 로딩 ─────────────────────────────────────────
+# 0.3.0부터 chromadb는 선택 의존성([embed])이다. BM25 전용 모드에서는 설치
+# 부담을 줄이기 위해 import 자체를 미룬다. 없으면 stderr에 안내를 한 번만
+# 남기고 BM25 전용으로 동작한다.
+_CHROMA_TUPLE = (False, None, None)
+_CHROMA_RESOLVED = False
+
+
+def _load_chroma():
+    """chromadb를 실제로 쓸 때만 import한다. (available, chromadb, Settings)를 반환."""
+    global _CHROMA_TUPLE, _CHROMA_RESOLVED
+    if _CHROMA_RESOLVED:
+        return _CHROMA_TUPLE
+    _CHROMA_RESOLVED = True
+    try:
+        import chromadb
+        from chromadb.config import Settings
+    except ImportError:
+        print(
+            "ℹ️  chromadb 미설치 — BM25 전용 모드로 실행. "
+            "dense 검색이 필요하면 `wiki-mcp[embed]`을(를) 설치하세요.",
+            file=sys.stderr,
+        )
+        _CHROMA_TUPLE = (False, None, None)
+    else:
+        _CHROMA_TUPLE = (True, chromadb, Settings)
+    return _CHROMA_TUPLE
 
 
 def extract_links(content: str) -> list[str]:
@@ -58,18 +103,19 @@ class WikiIndexer:
         self.embedding_provider = EMBEDDING_PROVIDER
         self.embedding_api_key = EMBEDDING_API_KEY
 
-        self.store = store
+        self.store = store and _load_chroma()[0]
         # build() 는 감시 스레드와 도구 호출 양쪽에서 불린다. writer 도구가 도구 안에서
         # build() 를 다시 부르므로 RLock.
         self._lock = threading.RLock()
 
-        # Chroma (영구)
+        # Chroma (영구) — chromadb가 설치돼 있을 때만. 없으면 BM25 전용으로 강등.
         self.client = None
         self.collection = None
-        if store:
+        if self.store:
+            chroma_ok, chromadb, settings_cls = _load_chroma()
             self.client = chromadb.PersistentClient(
                 path=str(self.data_dir / "chroma"),
-                settings=Settings(anonymized_telemetry=False),
+                settings=settings_cls(anonymized_telemetry=False),
             )
             self.collection = self._open_collection()
 
@@ -244,9 +290,7 @@ class WikiIndexer:
                     print(f"임베딩 갱신: {len(embed_queue)}개", file=sys.stderr)
                 for i, note in enumerate(embed_queue, 1):
                     text = (
-                        f"# {note['title']}\n"
-                        f"태그: {', '.join(note['tags'])}\n\n"
-                        f"{note['content']}"
+                        f"# {note['title']}\n태그: {', '.join(note['tags'])}\n\n{note['content']}"
                     )
                     try:
                         emb = self._embed(text)
@@ -254,11 +298,13 @@ class WikiIndexer:
                             ids=[note["id"]],
                             embeddings=[emb],
                             documents=[text],
-                            metadatas=[{
-                                "title": note["title"],
-                                "tags": ",".join(note["tags"]),
-                                "path": note["path"],
-                            }],
+                            metadatas=[
+                                {
+                                    "title": note["title"],
+                                    "tags": ",".join(note["tags"]),
+                                    "path": note["path"],
+                                }
+                            ],
                         )
                         new_cache[note["id"]] = note["content_hash"]
                         embedded += 1
@@ -277,10 +323,7 @@ class WikiIndexer:
 
         # BM25 rebuild
         docs = list(self.notes.values())
-        tokenized = [
-            tokenize(f"{n['title']} {' '.join(n['tags'])} {n['content']}")
-            for n in docs
-        ]
+        tokenized = [tokenize(f"{n['title']} {' '.join(n['tags'])} {n['content']}") for n in docs]
         self.bm25 = BM25Okapi(tokenized) if tokenized else None
         self._bm25_doc_ids = [n["id"] for n in docs]
 
@@ -299,8 +342,7 @@ class WikiIndexer:
         }
         if verbose:
             print(
-                f"✅ 인덱싱 완료 — {stats['notes']}개 노트, "
-                f"{stats['edges']}개 링크",
+                f"✅ 인덱싱 완료 — {stats['notes']}개 노트, {stats['edges']}개 링크",
                 file=sys.stderr,
             )
         return stats
@@ -345,7 +387,8 @@ class WikiIndexer:
             scores = self.bm25.get_scores(tokens)
             bm25_ranked = sorted(
                 (
-                    (i, s) for i, s in enumerate(scores)
+                    (i, s)
+                    for i, s in enumerate(scores)
                     if not q_tokens.isdisjoint(self.bm25.doc_freqs[i])
                 ),
                 key=lambda x: -x[1],

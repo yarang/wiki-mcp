@@ -4,6 +4,7 @@ FakeIndex는 실제 indexer의 계약(notes/all_ids/in_links/wiki_path/build/sea
 디스크 rescan으로 충실히 재현한다. 임베딩·BM25 랭킹은 테스트 범위 밖이므로
 search_hybrid는 결정적(빈 결과 또는 주입) 스텁으로 둔다.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -75,6 +76,31 @@ def wiki(tmp_path: Path) -> Path:
     w = tmp_path / "wiki"
     w.mkdir()
     return w
+
+
+# ─── KB 모드 픽스처 (0.3.0) ──────────────────────────────────────────
+@pytest.fixture
+def kb_root(tmp_path: Path) -> Path:
+    """KB 루트 폴더(초기화 전)."""
+    return tmp_path / "kb"
+
+
+@pytest.fixture
+def kb(kb_root: Path):
+    """초기화된 KnowledgeBase."""
+    from wiki_mcp.kb.store import KnowledgeBase
+
+    store = KnowledgeBase(kb_root)
+    store.init()
+    return store
+
+
+@pytest.fixture
+def source_dir(tmp_path: Path) -> Path:
+    """원본 폴더로 쓸 빈 디렉토리."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    return d
 
 
 @pytest.fixture

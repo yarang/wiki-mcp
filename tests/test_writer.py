@@ -1,4 +1,5 @@
 """writer.py characterization 테스트 — ID 검증·frontmatter 포맷·경로·CRUD 계약 고정."""
+
 from __future__ import annotations
 
 import pytest
@@ -98,14 +99,19 @@ class TestBuildFrontmatter:
 
     def test_extra_fields_appended_and_standard_dropped(self):
         fm = build_frontmatter(
-            "x", "T", "", ["t"], "2026-01-01", "2026-01-01",
+            "x",
+            "T",
+            "",
+            ["t"],
+            "2026-01-01",
+            "2026-01-01",
             extra={"status": "draft", "id": "SHOULD_BE_DROPPED"},
         )
         assert 'status: "draft"\n' in fm
         assert "SHOULD_BE_DROPPED" not in fm
 
     def test_title_escapes_quote(self):
-        fm = build_frontmatter('x', 'a"b', "", [], "2026-01-01", "2026-01-01")
+        fm = build_frontmatter("x", 'a"b', "", [], "2026-01-01", "2026-01-01")
         assert 'title: "a\\"b"\n' in fm
 
 
@@ -160,7 +166,8 @@ class TestTemplates:
 
     def test_load_template_extra_and_body(self, wiki):
         tdir = self._make_template(
-            wiki, "concept",
+            wiki,
+            "concept",
             "---\nid: x\nstatus: draft\ntags: [seed]\n---\n## 정의\n\n{{body}}\n",
         )
         t = load_template(tdir, "concept")
@@ -178,7 +185,13 @@ class TestTemplates:
 class TestCreateNote:
     def test_creates_file_with_explicit_domain(self, idx, graph):
         r = create_note(
-            idx, graph, id="rag", title="RAG", body="본문", tags=["llm"], domain="llm",
+            idx,
+            graph,
+            id="rag",
+            title="RAG",
+            body="본문",
+            tags=["llm"],
+            domain="llm",
         )
         assert r["status"] == "ok"
         assert r["relative_path"] == "llm/concepts/rag.md"
@@ -204,22 +217,42 @@ class TestCreateNote:
     def test_force_overwrites_with_backup(self, idx, graph):
         create_note(idx, graph, id="rag", title="RAG", body="b", tags=[], domain="llm")
         r = create_note(
-            idx, graph, id="rag", title="RAG2", body="c", tags=[], domain="llm", force=True,
+            idx,
+            graph,
+            id="rag",
+            title="RAG2",
+            body="c",
+            tags=[],
+            domain="llm",
+            force=True,
         )
         assert r["status"] == "ok"
         assert r["backup"] is not None
 
     def test_dry_run_no_write(self, idx, graph):
         r = create_note(
-            idx, graph, id="rag", title="RAG", body="b", tags=[], domain="llm", dry_run=True,
+            idx,
+            graph,
+            id="rag",
+            title="RAG",
+            body="b",
+            tags=[],
+            domain="llm",
+            dry_run=True,
         )
         assert r["status"] == "preview"
         assert not (idx.wiki_path / "llm/concepts/rag.md").exists()
 
     def test_broken_link_warning(self, idx, graph):
         r = create_note(
-            idx, graph, id="rag", title="RAG", body="b", tags=[],
-            domain="llm", links=["nonexistent"],
+            idx,
+            graph,
+            id="rag",
+            title="RAG",
+            body="b",
+            tags=[],
+            domain="llm",
+            links=["nonexistent"],
         )
         assert r["status"] == "ok"
         assert any("broken" in w for w in r["warnings"])
@@ -232,8 +265,16 @@ class TestCreateNote:
             encoding="utf-8",
         )
         r = create_note(
-            idx, graph, id="rag", title="RAG", body="", tags=[], domain="llm",
-            template="concept", template_dir=tdir, sections={"정의": "RAG란..."},
+            idx,
+            graph,
+            id="rag",
+            title="RAG",
+            body="",
+            tags=[],
+            domain="llm",
+            template="concept",
+            template_dir=tdir,
+            sections={"정의": "RAG란..."},
         )
         assert r["status"] == "ok"
         text = (idx.wiki_path / r["relative_path"]).read_text(encoding="utf-8")
@@ -244,9 +285,16 @@ class TestCreateNote:
 # ─── update / add_link / delete 흐름 ─────────────────────────────────
 class TestNoteLifecycle:
     def _seed(self, idx, graph, nid, **kw):
-        return create_note(idx, graph, id=nid, title=kw.get("title", nid),
-                           body=kw.get("body", "본문"), tags=kw.get("tags", []),
-                           domain="llm", links=kw.get("links"))
+        return create_note(
+            idx,
+            graph,
+            id=nid,
+            title=kw.get("title", nid),
+            body=kw.get("body", "본문"),
+            tags=kw.get("tags", []),
+            domain="llm",
+            links=kw.get("links"),
+        )
 
     def test_update_body_and_last_updated(self, idx, graph):
         self._seed(idx, graph, "rag")

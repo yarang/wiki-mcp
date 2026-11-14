@@ -1,22 +1,27 @@
 """FastMCP server — LLM Wiki를 MCP tool로 노출."""
+
 from __future__ import annotations
 
+import functools
+import json
 import re
 import sys
 from pathlib import Path
+
+from mcp.server.fastmcp import FastMCP
 
 from wiki_mcp.config import (
     DATA_DIR,
     DEFAULT_TEMPLATE,
     EMBEDDING_MODEL,
+    KB_DIR,
+    KB_ENABLED,
     OLLAMA_URL,
     TEMPLATE_DIR,
     WIKI_PATH,
 )
 from wiki_mcp.graph import WikiGraph
 from wiki_mcp.indexer import WikiIndexer
-from mcp.server.fastmcp import FastMCP
-
 
 mcp = FastMCP("LLM Wiki")
 
@@ -38,33 +43,88 @@ print(f"🔧 검색 모드: {mode}", file=sys.stderr)
 idx.build()
 graph = WikiGraph(idx)
 
+# ─── KB 모드 (0.3.0) ─────────────────────────────────────────────────
+# WIKI_KB_DIR 이 정해졌을 때만 켜진다. 시작 시 스캔은 돌리지 않는다(사용자가
+# scan_sources 로 동기화한다). 색인은 기존 추출 결과(.kb/extract)로 만든다.
+kb_store = None
+source_index = None
+if KB_ENABLED:
+    from wiki_mcp.kb.store import KnowledgeBase
+
+    kb_store = KnowledgeBase(KB_DIR)
+    if kb_store.sources_file.exists():
+        from wiki_mcp.kb.search import SourceIndex
+
+        source_index = SourceIndex(kb_store)
+        built = source_index.build()
+        print(
+            f"📦 KB 모드: {KB_DIR} — 원본 조각 {built['chunks']}개 색인 "
+            f"(스캔은 scan_sources 도구로)",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"⚠️  KB 폴더가 초기화되지 않았다: {KB_DIR} — "
+            f"`wiki-mcp kb init --kb <폴더>` 먼저. KB 도구는 등록하지 않는다.",
+            file=sys.stderr,
+        )
+        kb_store = None
+
 
 # ─── Tools ─────────────────────────────────────────────────────
 @mcp.tool()
-def search_wiki(query: str, top_k: int = 5, tag_filter: str = "") -> str:
-    """LLM Wiki에서 hybrid 검색 (BM25 + dense embedding RRF fusion).
+def search_wiki(query: str, top_k: int = 5, tag_filter: str = "", scope: str = "all") -> str:
+    """[읽기] Wiki hybrid 검색 (BM25 + dense embedding RRF fusion).
 
     한국어 + 영어 query 모두 지원. `[[id]]` 형식 정확 매칭에 강함.
+    KB 모드(WIKI_KB_DIR 설정)에서는 원본 문서(추출 결과)도 함께 검색한다.
 
     Args:
         query: 검색어
         top_k: 반환할 노트 수 (1-20, 기본 5)
         tag_filter: 특정 태그로 필터 (예: "rag", "mcp", "safety", "claude-code")
+        scope: 검색 범위 — "all"(노트+원본, 기본) | "notes"(노트만) |
+            "sources"(원본만). KB 모드가 아니면 이 인자는 무시된다.
 
     Returns:
-        관련 노트 목록 — id, 제목, 도메인, in-degree, 태그, snippet
+        관련 노트 목록 — id, 제목, 도메인, in-degree, 태그, snippet.
+        원본 결과는 kind=source 로 source_id·rel_path·location·원본 경로·snippet 포함.
     """
     top_k = max(1, min(int(top_k), 20))
     tag = tag_filter.strip() or None
-    results = idx.search_hybrid(query, top_k=top_k, tag_filter=tag)
+    if scope not in ("all", "notes", "sources"):
+        return f'잘못된 scope: "{scope}" — all | notes | sources 중 하나'
 
-    if not results:
-        return f"검색 결과 없음 (query: \"{query}\", tag: {tag})"
+    note_results: list[dict] = []
+    source_results: list[dict] = []
+    if source_index is not None:
+        if scope in ("all", "notes"):
+            note_results = idx.search_hybrid(query, top_k=top_k, tag_filter=tag)
+        if scope in ("all", "sources") and not tag:
+            source_results = source_index.search(query, top_k=top_k)
+    else:
+        note_results = idx.search_hybrid(query, top_k=top_k, tag_filter=tag)
 
-    lines = [f"# 검색 결과 ({len(results)}개) — query: \"{query}\""]
+    merged = _merge_results(note_results, source_results, top_k)
+    if not merged:
+        return f'검색 결과 없음 (query: "{query}", tag: {tag}, scope: {scope})'
+
+    lines = [f'# 검색 결과 ({len(merged)}개) — query: "{query}"']
     if tag:
         lines.append(f"_태그 필터: {tag}_")
-    for r in results:
+    if source_index is not None:
+        lines.append(f"_범위: {scope}_")
+    for r in merged:
+        if r.get("kind") == "source":
+            loc = r.get("location") or "-"
+            lines.append(
+                f"\n## [원본] {r.get('title') or r['rel_path']} — {r['rel_path']}\n"
+                f"- **출처**: `{r['source_id']}` | **위치**: `{loc}` "
+                f"| **점수**: {r['score']:.4f}\n"
+                f"- **원본 경로**: `{r.get('path') or ''}`\n\n"
+                f"{r['snippet']}...\n"
+            )
+            continue
         in_deg = graph.hub_score(r["id"])
         domain = graph.domain_of(r["id"])
         snippet = r["content"][:600].replace("\n\n\n", "\n\n")
@@ -79,6 +139,22 @@ def search_wiki(query: str, top_k: int = 5, tag_filter: str = "") -> str:
     return "\n".join(lines)
 
 
+def _merge_results(notes: list[dict], sources: list[dict], top_k: int) -> list[dict]:
+    """노트·원본 검색 결과를 RRF 로 합친다(서로 다른 점수 척도라 순위 기반)."""
+    scores: dict[tuple[str, str], float] = {}
+    items: dict[tuple[str, str], dict] = {}
+    for results, kind, key_of in (
+        (notes, "note", lambda r: r["id"]),
+        (sources, "source", lambda r: f"{r['source_id']}:{r['rel_path']}"),
+    ):
+        for rank, r in enumerate(results):
+            k = (kind, key_of(r))
+            scores[k] = scores.get(k, 0.0) + 1.0 / (60 + rank)
+            items.setdefault(k, r)
+    ranked = sorted(scores.items(), key=lambda kv: -kv[1])[:top_k]
+    return [{**items[k], "score": s} for k, s in ranked]
+
+
 @mcp.tool()
 def read_note(note_id: str) -> str:
     """특정 wiki 노트의 전체 내용 읽기.
@@ -91,15 +167,10 @@ def read_note(note_id: str) -> str:
     """
     note_id = note_id.strip().strip("[]")
     if note_id not in idx.notes:
-        candidates = [
-            nid for nid in idx.all_ids
-            if note_id.lower() in nid.lower()
-        ][:5]
+        candidates = [nid for nid in idx.all_ids if note_id.lower() in nid.lower()][:5]
         msg = f"❌ 노트 [[{note_id}]] 없음."
         if candidates:
-            msg += "\n\n비슷한 후보:\n" + "\n".join(
-                f"- [[{c}]]" for c in candidates
-            )
+            msg += "\n\n비슷한 후보:\n" + "\n".join(f"- [[{c}]]" for c in candidates)
         return msg
 
     n = idx.notes[note_id]
@@ -222,7 +293,7 @@ def suggest_new_note(topic: str, top_k: int = 8) -> str:
     cross_links = [r["id"] for r in related[:5]]
 
     lines = [
-        f"# 새 노트 제안 — \"{topic}\"\n",
+        f'# 새 노트 제안 — "{topic}"\n',
         f"## 권장 ID\n`{suggested_id}`\n",
         f"## 권장 경로\n`wiki/{top_domain}/concepts/{suggested_id}.md`\n",
         f"_(또는 `wiki/{top_domain}/guides/{suggested_id}.md`)_\n",
@@ -234,21 +305,23 @@ def suggest_new_note(topic: str, top_k: int = 8) -> str:
             f"(점수 {r['score']:.3f}, 도메인 `{graph.domain_of(r['id'])}`)"
         )
 
-    lines.extend([
-        f"\n## 새 노트에 추가할 cross-link (권장 5개)",
-        *(f"- [[{nid}]]" for nid in cross_links),
-        f"\n## Frontmatter 템플릿\n",
-        "```yaml",
-        "---",
-        f"id: {suggested_id}",
-        f'title: "{topic}"',
-        'source_url: ""',
-        "tags: []",
-        'created_at: "2026-06-22"',
-        'last_updated: "2026-06-22"',
-        "---",
-        "```",
-    ])
+    lines.extend(
+        [
+            "\n## 새 노트에 추가할 cross-link (권장 5개)",
+            *(f"- [[{nid}]]" for nid in cross_links),
+            "\n## Frontmatter 템플릿\n",
+            "```yaml",
+            "---",
+            f"id: {suggested_id}",
+            f'title: "{topic}"',
+            'source_url: ""',
+            "tags: []",
+            'created_at: "2026-06-22"',
+            'last_updated: "2026-06-22"',
+            "---",
+            "```",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -261,17 +334,17 @@ def get_wiki_stats() -> str:
     hubs = graph.top_hubs(limit=15)
 
     lines = [
-        f"# Wiki 통계\n",
+        "# Wiki 통계\n",
         f"- **노트**: {total}개",
         f"- **Link edges**: {edges}개",
         f"- **도메인**: {len(domains)}개",
-        f"- **평균 in-degree**: {edges/total:.2f}",
-        f"\n## 도메인별 노트 수",
+        f"- **평균 in-degree**: {edges / total:.2f}",
+        "\n## 도메인별 노트 수",
     ]
     for d, n in sorted(domains.items(), key=lambda x: -x[1])[:15]:
         lines.append(f"- `{d}` — {n}")
 
-    lines.append(f"\n## 상위 Hub 노트 (in-degree)")
+    lines.append("\n## 상위 Hub 노트 (in-degree)")
     for i, (nid, count) in enumerate(hubs, 1):
         title = idx.notes[nid]["title"] if nid in idx.notes else "(missing)"
         lines.append(f"{i}. [[{nid}]] — {title} ({count}개 참조)")
@@ -312,8 +385,7 @@ def verify_citations(text: str) -> str:
         for c in invalid:
             # fuzzy 제안
             suggestions = [
-                nid for nid in idx.all_ids
-                if c.lower() in nid.lower() or nid.lower() in c.lower()
+                nid for nid in idx.all_ids if c.lower() in nid.lower() or nid.lower() in c.lower()
             ][:3]
             extra = f" → 비슷: {', '.join(f'[[{s}]]' for s in suggestions)}" if suggestions else ""
             lines.append(f"- `{c}`{extra}")
@@ -377,11 +449,18 @@ def create_note(
     Returns:
         JSON — status (ok/error/preview), path, warnings, backup
     """
-    from wiki_mcp.writer import create_note as _create
     import json
+
+    from wiki_mcp.writer import create_note as _create
+
     effective_template = (template or DEFAULT_TEMPLATE) or None
     result = _create(
-        idx, graph, id, title, body, tags,
+        idx,
+        graph,
+        id,
+        title,
+        body,
+        tags,
         domain=domain or None,
         links=links or [],
         source_url=source_url,
@@ -408,39 +487,63 @@ def ingest_raw(file: str = "", limit: int = 10) -> str:
         JSON — 처리 결과 목록 (파일별 status/id/error).
     """
     import json
+
     from wiki_mcp import config
     from wiki_mcp.ingest import ingest_file, iter_raw_files, openai_chat_complete
 
     if not config.INGEST_MODEL:
-        return json.dumps({
-            "status": "error",
-            "error": "WIKI_INGEST_MODEL 미설정 — Open WebUI 모델명을 지정하세요 (WIKI_INGEST_URL/API_KEY 포함).",
-        }, ensure_ascii=False, indent=2)
+        return json.dumps(
+            {
+                "status": "error",
+                "error": "WIKI_INGEST_MODEL 미설정 — Open WebUI 모델명을 지정하세요 (WIKI_INGEST_URL/API_KEY 포함).",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
 
     if not config.RAW_DIR or not Path(config.RAW_DIR).is_dir():
-        return json.dumps({
-            "status": "error",
-            "error": f"raw 디렉토리 없음: {config.RAW_DIR}",
-        }, ensure_ascii=False, indent=2)
+        return json.dumps(
+            {
+                "status": "error",
+                "error": f"raw 디렉토리 없음: {config.RAW_DIR}",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
 
     if file:
         targets = [Path(config.RAW_DIR) / file]
         if not targets[0].exists():
-            return json.dumps({
-                "status": "error", "error": f"파일 없음: {targets[0]}",
-            }, ensure_ascii=False, indent=2)
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": f"파일 없음: {targets[0]}",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
     else:
         targets = iter_raw_files(config.RAW_DIR, config.INGEST_EXTENSIONS)[: max(1, int(limit))]
 
     if not targets:
-        return json.dumps({
-            "status": "ok", "message": "처리할 원문 없음", "results": [],
-        }, ensure_ascii=False, indent=2)
+        return json.dumps(
+            {
+                "status": "ok",
+                "message": "처리할 원문 없음",
+                "results": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
 
     def complete_fn(system, user):
         return openai_chat_complete(
-            config.INGEST_URL, config.INGEST_MODEL, config.INGEST_API_KEY,
-            system, user, timeout=config.INGEST_TIMEOUT,
+            config.INGEST_URL,
+            config.INGEST_MODEL,
+            config.INGEST_API_KEY,
+            system,
+            user,
+            timeout=config.INGEST_TIMEOUT,
         )
 
     def _sub(p: Path) -> Path:
@@ -454,7 +557,9 @@ def ingest_raw(file: str = "", limit: int = 10) -> str:
     for p in targets:
         sub = _sub(p)
         r = ingest_file(
-            idx, graph, p,
+            idx,
+            graph,
+            p,
             complete_fn=complete_fn,
             template=(config.INGEST_TEMPLATE or None),
             template_dir=config.TEMPLATE_DIR,
@@ -467,11 +572,13 @@ def ingest_raw(file: str = "", limit: int = 10) -> str:
             ocr=config.INGEST_OCR,
             ocr_bin=config.INGEST_OCR_BIN,
         )
-        results.append({
-            k: r.get(k)
-            for k in ("file", "status", "id", "created", "relative_path", "error")
-            if r.get(k) is not None
-        })
+        results.append(
+            {
+                k: r.get(k)
+                for k in ("file", "status", "id", "created", "relative_path", "error")
+                if r.get(k) is not None
+            }
+        )
 
     return json.dumps({"status": "ok", "results": results}, ensure_ascii=False, indent=2)
 
@@ -483,6 +590,7 @@ def list_templates() -> str:
     create_note(template="<이름>") 로 적용할 수 있는 양식 목록을 반환한다.
     """
     from wiki_mcp.writer import list_templates as _list
+
     names = _list(TEMPLATE_DIR)
     if not names:
         return (
@@ -522,12 +630,18 @@ def update_note(
     Returns:
         JSON — status (ok/error/preview), path, backup, changes
     """
-    from wiki_mcp.writer import update_note as _update
     import json
+
+    from wiki_mcp.writer import update_note as _update
+
     result = _update(
-        idx, id,
-        body=body, title=title, tags=tags,
-        append=append, dry_run=dry_run,
+        idx,
+        id,
+        body=body,
+        title=title,
+        tags=tags,
+        append=append,
+        dry_run=dry_run,
     )
     return json.dumps(result, ensure_ascii=False, indent=2)
 
@@ -556,10 +670,14 @@ def add_link(
     Returns:
         JSON — status (ok/error/preview), link_added, section_created, backup
     """
-    from wiki_mcp.writer import add_link as _add_link
     import json
+
+    from wiki_mcp.writer import add_link as _add_link
+
     result = _add_link(
-        idx, id, target_id,
+        idx,
+        id,
+        target_id,
         display=display or None,
         dry_run=dry_run,
     )
@@ -584,10 +702,143 @@ def delete_note(id: str, confirm: bool = False, dry_run: bool = False) -> str:
     Returns:
         JSON — status (ok/error/preview), backup, inbound_links_broken, message
     """
-    from wiki_mcp.writer import delete_note as _delete
     import json
+
+    from wiki_mcp.writer import delete_note as _delete
+
     result = _delete(idx, id, confirm=confirm, dry_run=dry_run)
     return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+# ─── KB 모드 도구 (0.3.0, WIKI_KB_DIR 설정 시에만 등록) ──────────────
+def _register_kb_tools() -> None:
+    """원본 보존 지식 기반 도구 — kb_store 가 있을 때만 서버에 붙인다."""
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    from wiki_mcp import config as _config
+    from wiki_mcp.kb.errors import KBError
+    from wiki_mcp.kb.scanner import scan_sources as _scan_sources
+    from wiki_mcp.kb.sources import (
+        add_source as _kb_add_source,
+    )
+    from wiki_mcp.kb.sources import (
+        list_sources as _kb_list_sources,
+    )
+    from wiki_mcp.kb.sources import (
+        remove_source as _kb_remove_source,
+    )
+    from wiki_mcp.kb.status import kb_status as _kb_status
+
+    def _json_tool(fn):
+        """KBError → ToolError(isError 결과), 성공 → JSON 문자열."""
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return json.dumps(fn(*args, **kwargs), ensure_ascii=False, indent=2)
+            except KBError as e:
+                raise ToolError(f"[{e.code}] {e.message}") from e
+
+        return wrapper
+
+    @mcp.tool(name="add_source")
+    @_json_tool
+    def kb_add_source_tool(
+        path: str,
+        include: list[str] | None = None,
+        exclude: list[str] | None = None,
+        confirm: bool = False,
+    ) -> str:
+        """[관리] 원본 폴더를 지식 기반에 등록한다. 원본 폴더는 읽기만 한다.
+
+        민감해 보이는 이름(.ssh, 급여, 인사, password 등)이 경로에 있으면
+        등록을 유보하고 warning 을 돌려준다 — 계속하려면 confirm=True.
+
+        Args:
+            path: 원본 폴더 절대 경로
+            include: 포함 glob 목록 (예: ["*.hwpx"]). 비우면 지원 형식 전부.
+            exclude: 제외 glob 목록 (예: ["drafts/*"]).
+            confirm: 민감 이름 경고를 확인하고 등록 (기본 False).
+        """
+        return _kb_add_source(kb_store, path, include=include, exclude=exclude, confirm=confirm)
+
+    @mcp.tool(name="list_sources")
+    @_json_tool
+    def kb_list_sources_tool() -> str:
+        """[읽기] 등록된 원본 폴더 목록 — id, 경로, 포함/제외 규칙, 파일 수."""
+        return _kb_list_sources(kb_store)
+
+    @mcp.tool(name="remove_source")
+    @_json_tool
+    def kb_remove_source_tool(source_id: str) -> str:
+        """[관리] 원본 등록 제거. 원본 폴더는 건드리지 않고 KB 쪽 기록만 지운다.
+
+        Args:
+            source_id: list_sources 로 확인한 원본 id
+        """
+        return _kb_remove_source(kb_store, source_id)
+
+    @mcp.tool(name="scan_sources")
+    @_json_tool
+    def kb_scan_sources_tool() -> str:
+        """[관리] 모든 원본 폴더를 스캔해 새/바뀜/지움을 반영한다(결정적, LLM 없음).
+
+        원본에서 텍스트를 추출해 KB 추출층(.kb/extract)에 저장하고 검색 색인을
+        갱신한다. 원본 폴더에는 쓰지 않는다. 결과: new/changed/deleted/
+        unchanged/failed/extracted/changes.
+        """
+        result = _scan_sources(
+            kb_store,
+            ocr=_config.INGEST_OCR,
+            ocr_bin=_config.INGEST_OCR_BIN or None,
+            max_extract_chars=_config.KB_MAX_EXTRACT_CHARS,
+        )
+        if source_index is not None:
+            source_index.build()  # 스캔 결과로 검색 색인 갱신
+        return result
+
+    @mcp.tool(name="list_changes")
+    @_json_tool
+    def kb_list_changes_tool(status: str = "") -> str:
+        """[읽기] 마지막 스캔의 변경 목록(새/바뀜/지움/실패).
+
+        Args:
+            status: 상태 필터 — "new" | "changed" | "deleted" | "failed".
+                비우면 전체.
+        """
+        last = kb_store.load_last_scan()
+        if last is None:
+            return {"scanned_at": None, "changes": []}
+        changes = last.get("changes", [])
+        if status:
+            wanted = status.strip()
+            changes = [c for c in changes if c.get("status") == wanted]
+        return {"scanned_at": last.get("scanned_at"), "changes": changes}
+
+    @mcp.tool(name="read_extract")
+    @_json_tool
+    def kb_read_extract_tool(
+        source_id: str, rel_path: str, offset: int = 0, limit: int = 8000
+    ) -> str:
+        """[읽기] 원본 파일의 추출 결과를 조각 단위로 읽는다(manifest 등록 항목만).
+
+        Args:
+            source_id: 원본 id
+            rel_path: 원본 내 상대 경로('/' 구분)
+            offset: 시작 위치(문자). 다음 조각은 next_offset 으로.
+            limit: 이번 조각 길이(문자, 기본 8000, 상한 50000).
+        """
+        return source_index.read_extract(source_id, rel_path, offset=offset, limit=limit)
+
+    @mcp.tool(name="kb_status")
+    @_json_tool
+    def kb_status_tool() -> str:
+        """[읽기] 지식 기반 상태 — 원본별 파일 수·상태별 수·실패 목록·마지막 스캔 시각."""
+        return _kb_status(kb_store)
+
+
+if kb_store is not None:
+    _register_kb_tools()
 
 
 def _run() -> None:
@@ -603,7 +854,9 @@ def _run() -> None:
         autoindex.start(idx)
         print(f"👀 노트 변경 감지: {WIKI_PATH}", file=sys.stderr)
     except Exception as e:  # 위키 폴더가 없는 등 — 검색은 띄우고, 갱신은 reindex 도구로
-        print(f"⚠️  노트 변경 감지를 못 켰다 ({e}) — 바뀐 노트는 reindex 도구로 반영", file=sys.stderr)
+        print(
+            f"⚠️  노트 변경 감지를 못 켰다 ({e}) — 바뀐 노트는 reindex 도구로 반영", file=sys.stderr
+        )
 
     # http 전용 config는 이 브랜치 안에서만 lazy import (stdio 경로 영향 최소화)
     from wiki_mcp.config import (
@@ -626,8 +879,7 @@ def _run() -> None:
         install_auth(app, WIKI_MCP_API_KEY)
 
         print(
-            f"🌐 Streamable HTTP endpoint: "
-            f"http://{WIKI_MCP_HOST}:{WIKI_MCP_PORT}{WIKI_MCP_PATH}",
+            f"🌐 Streamable HTTP endpoint: http://{WIKI_MCP_HOST}:{WIKI_MCP_PORT}{WIKI_MCP_PATH}",
             file=sys.stderr,
         )
         if not WIKI_MCP_API_KEY:

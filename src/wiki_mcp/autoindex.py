@@ -7,6 +7,7 @@ watch·편집기·git 등 누가 노트를 바꾸든 여기서 파일 변경을 
 
 stdio transport 에서는 stdout 이 MCP 프로토콜이므로 로그는 stderr 로만 낸다.
 """
+
 from __future__ import annotations
 
 import sys

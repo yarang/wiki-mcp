@@ -1,15 +1,15 @@
 [project]
 name = "wiki-mcp"
-version = "0.2.4"
-description = "MCP server exposing a Korean atomic-note wiki — search, read, and natural-language CRUD with BM25+dense hybrid retrieval."
+version = "0.3.0"
+description = "MCP server exposing a Korean atomic-note wiki — search, read, and natural-language CRUD with BM25+dense hybrid retrieval. Optional knowledge-base (KB) mode indexes source folders in place, without touching the originals."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [{name = "William Jung"}]
-keywords = ["mcp", "wiki", "rag", "obsidian", "llm", "korean"]
+keywords = ["mcp", "wiki", "rag", "obsidian", "llm", "korean", "hwpx"]
 dependencies = [
-    "mcp[cli]>=1.0",
-    "chromadb>=0.4.22",
+    # mcp 2.x 는 FastMCP → MCPServer 등 API 가 바뀌었다. 0.3.0 은 1.x API 기준.
+    "mcp[cli]>=1.0,<2",
     "python-frontmatter>=1.0",
     "rank-bm25>=0.2.2",
     "requests>=2.31",
@@ -21,11 +21,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# 임베딩(dense) 검색용 벡터 저장소. 없으면 BM25 전용으로 동작한다.
+embed = ["chromadb>=0.4.22"]
+# 문서 추출 라이브러리(PDF/DOCX/PPTX/XLSX/HTML). KB 모드에서 필요.
+# 없으면 해당 형식은 failed(unsupported…extract_error)로 기록된다.
+docs = ["pypdf>=3.0", "docx2txt>=0.8", "python-pptx>=0.6", "openpyxl>=3.1", "beautifulsoup4>=4.11"]
 dev = ["pytest>=7.0", "ruff>=0.1.0", "build>=1.0"]
 
 [project.scripts]
-# CLI entrypoints — installed on PATH by `pip install`
-wiki-mcp = "wiki_mcp.server:main"
+# CLI entrypoints — 인자 없이 실행하면 MCP 서버(stdio), `kb` 하위 명령은 앱용 JSON CLI.
+wiki-mcp = "wiki_mcp.cli:main"
 wiki-mcp-watch = "wiki_mcp.watch:main"
 
 [build-system]
@@ -37,6 +42,18 @@ build-backend = "setuptools.build_meta"
 pythonpath = ["src", "tests"]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# 표준 기본 규칙 + import 정렬. BLE(blind except) 등 기존 코드가 쓰는
+# 관용(오류를 로그로 삼키는 추출 게이트)은 저장소 규칙에서 제외한다.
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

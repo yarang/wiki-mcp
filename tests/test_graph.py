@@ -1,4 +1,5 @@
 """graph.py characterization 테스트 — 링크 그래프 탐색·broken link·도메인 집계."""
+
 from __future__ import annotations
 
 from wiki_mcp.writer import create_note
@@ -6,8 +7,14 @@ from wiki_mcp.writer import create_note
 
 def _seed(idx, graph, nid, domain="llm", links=None, body="본문"):
     return create_note(
-        idx, graph, id=nid, title=nid.upper(), body=body, tags=[],
-        domain=domain, links=links,
+        idx,
+        graph,
+        id=nid,
+        title=nid.upper(),
+        body=body,
+        tags=[],
+        domain=domain,
+        links=links,
     )
 
 
@@ -62,8 +69,9 @@ class TestNeighbors:
         # a → b → a 순환에서 무한루프 없이 종료
         _seed(idx, graph, "b")
         _seed(idx, graph, "a", body="[[b]] 참조")
-        create_note(idx, graph, id="b", title="B", body="[[a]] 참조", tags=[],
-                    domain="llm", force=True)
+        create_note(
+            idx, graph, id="b", title="B", body="[[a]] 참조", tags=[], domain="llm", force=True
+        )
         levels = graph.neighbors("a", depth=5)
         assert "b" in levels[1]
 

@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: lint-and-test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "0.9.21"
+
+      - name: Install Python 3.12
+        run: uv python install 3.12
+
+      # [embed](chromadb)은 설치하지 않는다 — 없는 환경에서 전체 테스트가
+      # 통과해야 한다(관련 테스트는 skip).
+      - name: Sync dependencies (dev only)
+        run: uv sync --extra dev --python 3.12
+
+      - name: Ruff check
+        run: uv run --extra dev ruff check .
+
+      - name: Ruff format check
+        run: uv run --extra dev ruff format --check .
+
+      - name: Pytest
+        run: uv run --extra dev pytest -q

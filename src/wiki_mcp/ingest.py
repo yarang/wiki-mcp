@@ -5,14 +5,16 @@ watch 데몬과 `ingest_raw` MCP 도구가 공용으로 사용한다. LLM 호출
 
 흐름: raw 텍스트 → LLM이 원자 노트 JSON 생성 → create_note(template) → wiki/ 기록.
 """
+
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import re
 import shutil
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import requests
 
@@ -87,10 +89,7 @@ def build_prompts(
         f"{schema}\n{_RULES}{section_note}"
     )
     ids = "\n".join(candidate_details or candidate_ids) if candidate_ids else "(없음)"
-    user = (
-        f"기존 노트 ID: {ids}\n\n"
-        f"=== 원문 시작 ===\n{raw_text}\n=== 원문 끝 ==="
-    )
+    user = f"기존 노트 ID: {ids}\n\n=== 원문 시작 ===\n{raw_text}\n=== 원문 끝 ==="
     return system, user
 
 
@@ -113,20 +112,24 @@ def related_candidates(idx, text: str, limit: int = 8) -> list[dict[str, Any]]:
         if not nid or nid not in idx.all_ids or nid in seen:
             continue
         note = idx.notes.get(nid, {})
-        candidates.append({
-            "id": nid,
-            "title": str(note.get("title", result.get("title", "")) or ""),
-            "tags": [str(t) for t in (note.get("tags", result.get("tags", [])) or [])],
-        })
+        candidates.append(
+            {
+                "id": nid,
+                "title": str(note.get("title", result.get("title", "")) or ""),
+                "tags": [str(t) for t in (note.get("tags", result.get("tags", [])) or [])],
+            }
+        )
         seen.add(nid)
     if not candidates:
         for nid in sorted(idx.all_ids)[:limit]:
             note = idx.notes.get(nid, {})
-            candidates.append({
-                "id": nid,
-                "title": str(note.get("title", "") or ""),
-                "tags": [str(t) for t in (note.get("tags", []) or [])],
-            })
+            candidates.append(
+                {
+                    "id": nid,
+                    "title": str(note.get("title", "") or ""),
+                    "tags": [str(t) for t in (note.get("tags", []) or [])],
+                }
+            )
     return candidates[:limit]
 
 
@@ -134,7 +137,9 @@ def _candidate_details(candidates: list[dict[str, Any]]) -> list[str]:
     details: list[str] = []
     for candidate in candidates:
         tags = ", ".join(candidate.get("tags", [])[:4]) or "태그 없음"
-        details.append(f"- {candidate['id']} | {candidate.get('title') or candidate['id']} | {tags}")
+        details.append(
+            f"- {candidate['id']} | {candidate.get('title') or candidate['id']} | {tags}"
+        )
     return details
 
 
@@ -207,7 +212,8 @@ def create_source_note(idx, graph, raw_path: Path, raw_text: str) -> dict[str, A
         f"{raw_text.rstrip()}\n"
     )
     return create_note(
-        idx, graph,
+        idx,
+        graph,
         id=source_id,
         title=f"원문: {raw_path.name}",
         body=body,
@@ -352,6 +358,7 @@ def ingest_text(
 
 # ─── 긴 문서 청킹 (아웃라인 → 노트별 작성) ────────────────────────────────
 
+
 def split_into_windows(text: str, max_chars: int) -> list[str]:
     """마크다운 헤딩(#..######) 경계 우선 → 큰 조각은 문단 단위로 max_chars까지 묶음."""
     if max_chars <= 0 or len(text) <= max_chars:
@@ -440,17 +447,19 @@ def outline_document(
             data = parse_note_json(complete_fn(*_outline_prompts(w, existing_ids, max_notes)))
         except Exception:
             continue
-        for n in (data.get("notes") or []):
+        for n in data.get("notes") or []:
             nid = str(n.get("id", "")).strip()
             if not nid or nid in seen:
                 continue
             seen.add(nid)
-            planned.append({
-                "id": nid,
-                "title": str(n.get("title", "") or nid),
-                "scope": str(n.get("scope", "") or ""),
-                "window_idx": wi,
-            })
+            planned.append(
+                {
+                    "id": nid,
+                    "title": str(n.get("title", "") or nid),
+                    "scope": str(n.get("scope", "") or ""),
+                    "window_idx": wi,
+                }
+            )
             if len(planned) >= max_notes:
                 break
     return planned, windows
@@ -466,13 +475,17 @@ def _write_prompts(
     ids = "\n".join(candidate_details or sibling_ids) if sibling_ids else "(없음)"
     if section_headings:
         secs = ", ".join(f'"{h}"' for h in section_headings)
-        schema = ('{"tags": ["tag1"], "links": ["id"], '
-                  f'"sections": {{{secs}: "내용"}}, '
-                  '"evidence": ["원문에서 그대로 복사한 근거 구절"]}')
+        schema = (
+            '{"tags": ["tag1"], "links": ["id"], '
+            f'"sections": {{{secs}: "내용"}}, '
+            '"evidence": ["원문에서 그대로 복사한 근거 구절"]}'
+        )
         section_note = f"- sections: {secs} 각 섹션을 원문 기반으로 채운다. 없으면 빈 문자열.\n"
     else:
-        schema = ('{"tags": ["tag1"], "links": ["id"], "body": "마크다운 본문", '
-                  '"evidence": ["원문에서 그대로 복사한 근거 구절"]}')
+        schema = (
+            '{"tags": ["tag1"], "links": ["id"], "body": "마크다운 본문", '
+            '"evidence": ["원문에서 그대로 복사한 근거 구절"]}'
+        )
         section_note = "- body: 핵심을 간결한 마크다운으로 작성한다.\n"
     system = (
         f"너는 '{planned['title']}' 주제의 원자 위키 노트 본문을 작성한다. "
@@ -531,15 +544,15 @@ def ingest_long_text(
             note = parse_note_json(
                 complete_fn(*_write_prompts(window_text, p, siblings, section_headings, details))
             )
-            evidence = validate_evidence(window_text, note.get("evidence")) if require_evidence else []
+            evidence = (
+                validate_evidence(window_text, note.get("evidence")) if require_evidence else []
+            )
         except Exception as e:
             results.append({"id": p["id"], "status": "error", "error": f"작성 실패: {e}"})
             continue
         raw_sec = note.get("sections") if section_headings else None
         sections = (
-            {str(k): str(v) for k, v in raw_sec.items() if v}
-            if isinstance(raw_sec, dict)
-            else None
+            {str(k): str(v) for k, v in raw_sec.items() if v} if isinstance(raw_sec, dict) else None
         )
         body = str(note.get("body", "") or "")
         if source_id and evidence:
@@ -553,7 +566,8 @@ def ingest_long_text(
         if source_id and source_id not in note_links:
             note_links.append(source_id)
         r = create_note(
-            idx, graph,
+            idx,
+            graph,
             id=p["id"],
             title=p["title"],
             body=body,
@@ -564,13 +578,15 @@ def ingest_long_text(
             template_dir=template_dir,
             sections=sections,
         )
-        results.append({
-            "id": p["id"],
-            "status": r.get("status"),
-            "relative_path": r.get("relative_path"),
-            "error": r.get("error"),
-            "rejected_links": rejected_links,
-        })
+        results.append(
+            {
+                "id": p["id"],
+                "status": r.get("status"),
+                "relative_path": r.get("relative_path"),
+                "error": r.get("error"),
+                "rejected_links": rejected_links,
+            }
+        )
         if r.get("status") == "ok":
             created.append(p["id"])
 
@@ -662,8 +678,11 @@ def ingest_file(
     raw_text = ""
     try:
         raw_text = extract_text(
-            raw_path, max_chars=max_extract_chars, xlsx_max_rows=xlsx_max_rows,
-            ocr=ocr, ocr_bin=ocr_bin,
+            raw_path,
+            max_chars=max_extract_chars,
+            xlsx_max_rows=xlsx_max_rows,
+            ocr=ocr,
+            ocr_bin=ocr_bin,
         )
         extract_error = None
     except ExtractionError as e:
@@ -683,18 +702,27 @@ def ingest_file(
             source_id = str(source["id"])
             if max_chars > 0 and len(raw_text) > max_chars:
                 result = ingest_long_text(
-                    idx, graph, raw_text,
+                    idx,
+                    graph,
+                    raw_text,
                     complete_fn=complete_fn,
-                    template=template, template_dir=template_dir,
-                    max_chars=max_chars, max_notes=max_notes,
-                    source_id=source_id, require_evidence=True,
+                    template=template,
+                    template_dir=template_dir,
+                    max_chars=max_chars,
+                    max_notes=max_notes,
+                    source_id=source_id,
+                    require_evidence=True,
                 )
             else:
                 result = ingest_text(
-                    idx, graph, raw_text,
+                    idx,
+                    graph,
+                    raw_text,
                     complete_fn=complete_fn,
-                    template=template, template_dir=template_dir,
-                    source_id=source_id, require_evidence=True,
+                    template=template,
+                    template_dir=template_dir,
+                    source_id=source_id,
+                    require_evidence=True,
                 )
             result["source_id"] = source_id
             result["source_relative_path"] = source.get("relative_path")

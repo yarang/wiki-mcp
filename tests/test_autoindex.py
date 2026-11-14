@@ -3,8 +3,10 @@
 watch 가 만든 노트가 mcpo 재기동 전까지 dense 검색에 잡히지 않던 회귀를 막는다:
 저장소에 쓰는 프로세스가 검색하는 프로세스와 같으면 새 벡터가 바로 보인다.
 """
+
 from __future__ import annotations
 
+import importlib.util
 import threading
 import time
 from pathlib import Path
@@ -14,6 +16,11 @@ from watchdog.events import DirModifiedEvent, FileModifiedEvent, FileMovedEvent
 
 from wiki_mcp import autoindex
 from wiki_mcp.indexer import WikiIndexer
+
+requires_chroma = pytest.mark.skipif(
+    importlib.util.find_spec("chromadb") is None,
+    reason="chromadb 미설치 — [embed] extra 필요",
+)
 
 
 def _note(wiki: Path, nid: str, body: str) -> Path:
@@ -81,6 +88,7 @@ def _wait(pred, timeout: float = 10.0) -> bool:
     return False
 
 
+@requires_chroma
 class TestLiveStore:
     @pytest.fixture
     def ix(self, wiki, tmp_path, monkeypatch) -> WikiIndexer:
