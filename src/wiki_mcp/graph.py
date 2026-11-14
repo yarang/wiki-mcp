@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from pathlib import PureWindowsPath
 
 
 class WikiGraph:
@@ -43,8 +44,11 @@ class WikiGraph:
     def domain_of(self, note_id: str) -> str:
         if note_id not in self.idx.notes:
             return ""
-        path = self.idx.notes[note_id]["path"]
-        return path.split("/")[0] if "/" in path else path
+        # rel_path의 첫 세그먼트. 저장은 as_posix()로 통일하지만, 구(버전)
+        # 색인처럼 '\' 표기가 섞여 들어와도 PureWindowsPath가 두 구분자를
+        # 모두 인식해 도메인이 통째로 노출되지 않게 한다.
+        parts = PureWindowsPath(str(self.idx.notes[note_id]["path"])).parts
+        return parts[0] if parts else ""
 
     def list_domains(self) -> dict[str, int]:
         counts: dict[str, int] = {}

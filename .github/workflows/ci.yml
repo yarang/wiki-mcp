@@ -44,4 +44,8 @@ jobs:
         run: uv run --extra dev ruff format --check .
 
       - name: Pytest
-        run: uv run --extra dev pytest -q
+        # --basetemp: Windows 러너의 기본 pytest 임시 폴더는 %LOCALAPPDATA%\Temp
+        # 안이라, 자식 프로세스(CLI·MCP 서버)로 도는 테스트의 add-source가
+        # system_folder 규칙에 걸린다. 러너 임시 폴더(D:\a\_temp 등)로 옮겨
+        # 제품 규칙 그대로 돌게 한다(README 개발 절 참고).
+        run: uv run --extra dev pytest -q --basetemp "${{ runner.temp }}/pytest"

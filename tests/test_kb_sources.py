@@ -51,8 +51,31 @@ class TestForbiddenRoots:
 
     Windows CI(windows-latest)의 tmp_path는 %LOCALAPPDATA%\\Temp 안이라 기본
     AppData 규칙에 걸린다. 그래서 테스트 중에는 금지 목록 팩토리를 끄고
-    conftest 가 아닌 이 테스트에서만 원본 계산으로 판정한다.
+    conftest 가 아닌 이 테스트에서만 원본 계산으로 판정한다. 환경 변수 기반
+    후보(SystemRoot·LOCALAPPDATA 등)는 실제 시스템에 따라 달려 있어
+    홈 안 일반 폴더 허용 같은 판정을 오염시키므로 autouse fixture로 비운 뒤
+    하드코딩 후보(~/AppData, ~/Library, POSIX 마운트 루트)만으로 검증한다.
+    환경 변수 → 후보 반영 자체는 test_windows_system_roots_from_env 가 지킨다.
     """
+
+    _ENV_ROOT_VARS = (
+        "SystemRoot",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramData",
+        "LOCALAPPDATA",
+        "APPDATA",
+    )
+
+    @pytest.fixture(autouse=True)
+    def _isolate_env_roots(self, monkeypatch):
+        """환경 변수 기반 금지 후보를 지워 실제 시스템 폴더와 격리한다.
+
+        Windows의 tmp_path 자체가 %LOCALAPPDATA%\\Temp 안이라 후보가 살아 있으면
+        home/Documents 같은 무고한 경로까지 금지로 오탐한다(CI 회귀).
+        """
+        for var in self._ENV_ROOT_VARS:
+            monkeypatch.delenv(var, raising=False)
 
     def _forbidden(self, home: Path, p: Path) -> bool:
         from wiki_mcp.kb.sources import _default_forbidden_roots
@@ -77,14 +100,29 @@ class TestForbiddenRoots:
         home.mkdir(parents=True)
         assert self._forbidden(home, home.parent)  # C:\\Users, /Users, /home 에 해당
         assert self._forbidden(home, home)
-        # 홈 안의 일반 폴더는 거부 아님
+        # 홈 안의 일반 폴더는 거부 아님 — tmp_path가 실제 시스템 금지 폴더
+        # (AppData 등) 안에 있어도 오탐하지 않는다.
         assert not self._forbidden(home, home / "Documents")
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX 마운트 루트 — Windows엔 없다")
     def test_posix_mount_roots_rejected(self, tmp_path):
         home = tmp_path / "home" / "user"
         home.mkdir(parents=True)
         for name in ("/Volumes", "/mnt", "/media"):
             assert self._forbidden(home, Path(name) / "usb"), name
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows 드라이브 루트 전용")
+    def test_windows_drive_root_and_users_parent_rejected(self):
+        """드라이브 루트(C:\\)와 홈의 상위(C:\\Users)는 Windows에서도 거부된다.
+
+        '/Volumes/usb'가 Windows의 Path.resolve()에서 'C:\\Volumes\\usb'로
+        바뀌어 POSIX 마운트 검사가 무의미해지는 대신, 대응하는 Windows
+        루트 경로를 직접 검증한다.
+        """
+        drive = os.environ.get("SystemDrive", "C:")
+        home = Path(f"{drive}/Users/someone")
+        assert self._forbidden(home, Path(home.anchor))  # 드라이브 루트 C:\
+        assert self._forbidden(home, home.parent)  # C:\Users — 홈의 상위
 
     def test_windows_system_roots_from_env(self, tmp_path, monkeypatch):
         """SystemRoot 등 후보는 C: 고정 문자열이 아니라 환경 변수로 만든다."""

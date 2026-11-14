@@ -198,6 +198,18 @@ uv run --extra dev pytest -q        # chromadb 없이 통과 (chromadb 테스트
   해도 추출기 테스트까지 돈다.
 - CI: Windows·macOS(3.12) + Ubuntu(3.10, 최소 지원 버전) 행렬
   ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+- **Windows 로컬에서 pytest를 돌릴 때는 `--basetemp`를 AppData 밖으로 잡는다**:
+
+  ```powershell
+  uv run --extra dev pytest -q --basetemp C:\pytest-tmp
+  ```
+
+  pytest의 기본 임시 폴더는 `%LOCALAPPDATA%\Temp` 안이다. CLI·MCP 서버를
+  자식 프로세스로 띄우는 테스트(test_cli·test_kb_server)에서 자식은 테스트용
+  금지 폴더 규칙 완화를 물려받지 못해, 원본 등록(add-source)이
+  `system_folder` 규칙에 걸려 실패한다. 그래서 CI도 `--basetemp`를 러너의
+  임시 폴더(`${{ runner.temp }}`)로 잡는다. AppData 안에서 실행하면 해당
+  테스트는 이유를 붙여 skip된다(제품 동작이 느슨해지는 우회 변수는 없다).
 
 ### 의존성 구성
 

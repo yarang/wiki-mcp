@@ -28,9 +28,17 @@ def validate_domain(domain: str) -> str:
     `..`·절대 경로·드라이브 문자·한글 도메인을 모두 이 규칙이 거부한다.
     여러 세그먼트는 '/'로 잇는다(a/b → a/b). 실패 시 ValueError.
     """
-    normalized = (domain or "").strip().strip("/")
+    normalized = (domain or "").strip()
     if "\\" in normalized:  # 백슬래시 세그먼트(Windows·UNC 표기)는 허용하지 않는다
         raise ValueError(f"도메인 형식 오류 (domain: '{domain}'). 폴더 구분은 '/'만 쓴다")
+    # 절대 경로('/tmp/...', '\\\\srv\\...')와 Windows 드라이브 문자('C:/...')는
+    # 문자열 단계에서 거부한다. 세그먼트 규칙만으로는 '/tmp/pytest-of-runner'
+    # 처럼 전부 소문자/하이픈/밑줄로 이루어진 절대 경로를 걸러내지 못한다.
+    if normalized.startswith(("/", "\\")):
+        raise ValueError(f"도메인은 상대 경로만 허용한다 (domain: '{domain}')")
+    if re.match(r"^[A-Za-z]:", normalized):
+        raise ValueError(f"도메인에 드라이브 문자를 쓸 수 없다 (domain: '{domain}')")
+    normalized = normalized.strip("/")
     if not normalized:
         raise ValueError("도메인이 비어 있음")
     segments = [s for s in normalized.split("/") if s]
@@ -110,6 +118,18 @@ STANDARD_FM_KEYS = frozenset(
 )
 
 
+def _yaml_quote(s: str) -> str:
+    """YAML 큰따옴표 스칼라로 직렬화 — 백슬래시와 큰따옴표를 이스케이프한다.
+
+    큰따옴표 스칼라 안의 '\\'는 이스케이프 시작이다. Windows 경로
+    (C:\\Users\\...)를 그대로 두면 '\\U' 등을 YAML 이스케이프로 읽어
+    파싱이 깨지고 노트가 색인에서 조용히 사라진다. 백슬래시를 먼저
+    두 배로 만들어야 '\\"'가 '\\\\\"'로 뒤집히지 않는다.
+    """
+    escaped = s.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def _format_fm_value(value: Any) -> str:
     """extra frontmatter 값을 YAML 스칼라/inline-list로 직렬화."""
     if isinstance(value, bool):
@@ -118,8 +138,7 @@ def _format_fm_value(value: Any) -> str:
         return str(value)
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(str(v) for v in value) + "]"
-    s = str(value).replace('"', '\\"')
-    return f'"{s}"'
+    return _yaml_quote(str(value))
 
 
 def build_frontmatter(
@@ -147,14 +166,14 @@ def build_frontmatter(
     Args:
         extra: 템플릿이 정의한 추가 필드(예: status, category). 표준 6필드는 제외됨.
     """
-    safe_title = (title or "").replace('"', '\\"')
-    safe_url = (source_url or "").replace('"', '\\"')
+    safe_title = _yaml_quote(title or "")
+    safe_url = _yaml_quote(source_url or "")
     tags_inline = ", ".join(tags) if tags else ""
     lines = [
         "---\n",
         f"id: {id}\n",
-        f'title: "{safe_title}"\n',
-        f'source_url: "{safe_url}"\n',
+        f"title: {safe_title}\n",
+        f"source_url: {safe_url}\n",
         f"tags: [{tags_inline}]\n",
         f'created_at: "{created_at}"\n',
         f'last_updated: "{last_updated}"\n',

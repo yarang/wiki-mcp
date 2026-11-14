@@ -249,7 +249,7 @@ class WikiIndexer:
                     "title": title,
                     "tags": tags,
                     "source_url": source_url,
-                    "path": str(md.relative_to(self.wiki_path)),
+                    "path": md.relative_to(self.wiki_path).as_posix(),
                     "content": content,
                     "content_hash": chash,
                     "out_links": links,

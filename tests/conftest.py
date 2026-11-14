@@ -56,7 +56,7 @@ class FakeIndex:
                 "title": post.get("title", "") or "",
                 "tags": post.get("tags", []) or [],
                 "source_url": post.get("source_url", "") or "",
-                "path": str(md.relative_to(self.wiki_path)),
+                "path": md.relative_to(self.wiki_path).as_posix(),
                 "content": content,
                 "out_links": links,
             }
@@ -139,3 +139,30 @@ def echo_note(note: dict):
         return json.dumps(note, ensure_ascii=False)
 
     return _fn
+
+
+def ensure_subprocess_tmp_ok(tmp_path: Path) -> None:
+    """CLI·MCP 서버 서브프로세스 테스트의 임시 폴더가 쓸 만한지 검사한다.
+
+    이 파일의 autouse fixture(금지 루트 끄기)는 monkeypatch라 자식 프로세스에
+    전달되지 않는다. Windows의 pytest 기본 basetemp(%LOCALAPPDATA%\\Temp)에서는
+    자식 프로세스가 add-source를 system_folder로 거부해 테스트 전체가 실패한다.
+    제품에 테스트용 우회 변수를 만들지 않는 대신, 이 상태에서는 이유를 붙여
+    skip한다. CI는 --basetemp를 AppData 밖(runner.temp)으로 잡아 이 상태를
+    피한다(워크플로 참고). 로컬 Windows에서는 README 개발 절의 안내대로
+    --basetemp를 지정하면 skip 없이 전체를 돌릴 수 있다.
+    """
+    import os
+    import sys
+
+    if sys.platform != "win32":
+        return
+    from wiki_mcp.kb.store import is_same_or_inside
+
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    if local_appdata and is_same_or_inside(tmp_path.resolve(), Path(local_appdata)):
+        pytest.skip(
+            f"pytest 임시 폴더({tmp_path})가 AppData 안이라 서브프로세스의 "
+            "add-source가 system_folder 규칙에 걸린다. AppData 밖으로 잡아 "
+            "실행한다(예: pytest --basetemp C:\\\\pytest-tmp). README 개발 절 참고."
+        )

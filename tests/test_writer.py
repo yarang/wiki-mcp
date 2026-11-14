@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+import frontmatter
 import pytest
 
 from wiki_mcp.writer import (
@@ -17,6 +18,7 @@ from wiki_mcp.writer import (
     list_templates,
     load_template,
     update_note,
+    validate_domain,
     validate_note_id,
 )
 
@@ -357,6 +359,54 @@ class TestNoteLifecycle:
         assert "rag" in r["inbound_links_broken"]
 
 
+# ─── validate_domain — 절대 경로·드라이브 문자열 거부 ────────────────
+class TestValidateDomainAbsolutes:
+    """OS와 무관하게 문자열 단계에서 절대 경로·드라이브를 거부한다."""
+
+    @pytest.mark.parametrize(
+        "domain",
+        ["/tmp/x", "\\srv\\share", "C:/x", "C:\\x", "d:/x", "\\\\server\\share"],
+    )
+    def test_absolute_and_drive_rejected(self, domain):
+        with pytest.raises(ValueError):
+            validate_domain(domain)
+
+    def test_slash_rooted_lowercase_path_rejected(self):
+        # 세그먼트가 전부 소문자/하이픈/밑줄이라도 앞의 '/'가 있으면 거부
+        with pytest.raises(ValueError, match="상대 경로"):
+            validate_domain("/tmp/pytest-of-runner/pytest-0")
+
+    def test_multi_segment_relative_accepted(self):
+        assert validate_domain("ml/rag") == "ml/rag"
+
+
+# ─── frontmatter 이스케이프 — Windows 경로 round-trip ─────────────────
+class TestFrontmatterWindowsPaths:
+    """source_url·title에 백슬래시가 있어도 YAML이 깨지지 않고 돌아온다.
+
+    큰따옴표 스칼라 안의 '\\U'는 YAML 이스케이프로 읽혀 파싱이 실패하고,
+    그 노트는 색인(except Exception: continue)에서 조용히 사라졌다.
+    """
+
+    def test_backslash_source_url_round_trips(self, tmp_path):
+        fm = build_frontmatter(
+            id="src",
+            title='원문: 보고서 "초안"',
+            source_url="C:\\Users\\runneradmin\\Documents\\보고서.md",
+            tags=["source"],
+            created_at="2026-11-15",
+            last_updated="2026-11-15",
+        )
+        note_file = tmp_path / "note.md"
+        note_file.write_text(fm + "\n본문\n", encoding="utf-8")
+        post = frontmatter.load(note_file)
+        assert post["source_url"] == "C:\\Users\\runneradmin\\Documents\\보고서.md"
+        assert post["title"] == '원문: 보고서 "초안"'
+
+    def test_extra_value_backslash_round_trips(self):
+        assert _format_fm_value("C:\\a\\b") == '"C:\\\\a\\\\b"'
+
+
 # ─── 경로 이탈 방지 (S2) ─────────────────────────────────────────────
 class TestPathEscape:
     """domain/노트 경로로 wiki 밖에 쓰는 공격을 거부한다.
@@ -388,6 +438,24 @@ class TestPathEscape:
         r = create_note(idx, graph, "escape", "제목", "본문", ["t"], domain=str(tmp_path))
         assert r["status"] == "error"
         assert not (tmp_path / f"{tmp_path.name}.md").exists()
+
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            "/tmp/pytest-of-runner/pytest-0/test-x0",  # 전 세그먼트가 규칙에 우연히 맞는 POSIX 절대 경로
+            "/home/o123/p/pytest",
+            "C:/Users/runneradmin/AppData/Local/Temp",  # Windows 드라이브 + 슬래시 표기
+            "D:\\Users\\runneradmin\\Temp",  # Windows 드라이브 + 백슬래시 표기
+        ],
+    )
+    def test_create_note_domain_absolute_string_rejected(self, idx, graph, domain):
+        """절대 경로 판정은 OS·세그먼트 규칙과 무관하게 문자열 단계에서 거부한다.
+
+        세그먼트 규칙만으로는 '/tmp/pytest-of-runner'처럼 모든 세그먼트가
+        소문자/하이픈/밑줄인 절대 경로를 걸러내지 못했다(ubuntu py3.10 회귀).
+        """
+        r = create_note(idx, graph, "escape", "제목", "본문", ["t"], domain=domain)
+        assert r["status"] == "error"
 
     def test_create_note_domain_drive_letter_rejected(self, idx, graph):
         r = create_note(idx, graph, "escape", "제목", "본문", ["t"], domain="C:\\ escape")

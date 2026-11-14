@@ -23,6 +23,15 @@ class TestDomainOf:
         _seed(idx, graph, "rag", domain="llm")
         assert graph.domain_of("rag") == "llm"
 
+    def test_domain_from_windows_style_path(self, idx, graph):
+        """'\' 구분자로 저장된 경로(Windows 색인)에서도 첫 세그먼트만 도메인이다.
+
+        split("/")만 쓰면 'llm\\concepts\\rag.md' 전체가 도메인으로 노출돼
+        list_domains가 파일별 카운트로 쪼개졌다(Windows CI 회귀).
+        """
+        idx.notes["rag"] = {"path": "llm\\concepts\\rag.md"}
+        assert graph.domain_of("rag") == "llm"
+
     def test_unknown_note_empty(self, idx, graph):
         assert graph.domain_of("ghost") == ""
 

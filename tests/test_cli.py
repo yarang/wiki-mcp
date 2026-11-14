@@ -14,8 +14,20 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import ensure_subprocess_tmp_ok
 
 REPO_SRC = str(Path(__file__).resolve().parent.parent / "src")
+
+
+@pytest.fixture(autouse=True)
+def _subprocess_tmp_guard(tmp_path: Path):
+    """이 모듈의 모든 테스트는 자식 프로세스로 CLI를 띄운다.
+
+    자식에는 conftest의 금지 루트 끄기(monkeypatch)가 전달되지 않아,
+    Windows의 기본 pytest 임시 폴더(%LOCALAPPDATA%\\Temp)에서는 add-source가
+    system_folder로 거부된다. 그 상태라면 이유를 붙여 skip한다(README 개발 절).
+    """
+    ensure_subprocess_tmp_ok(tmp_path)
 
 
 def run_cli(
