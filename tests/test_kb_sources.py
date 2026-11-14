@@ -50,12 +50,13 @@ class TestForbiddenRoots:
     """금지 폴더 규칙 — conftest가 기본 목록을 꺼도 원본 규칙은 그대로 검증한다.
 
     Windows CI(windows-latest)의 tmp_path는 %LOCALAPPDATA%\\Temp 안이라 기본
-    AppData 규칙에 걸린다. 그래서 테스트 중에는 금지 목록 팩토리를 끄고
-    conftest 가 아닌 이 테스트에서만 원본 계산으로 판정한다. 환경 변수 기반
-    후보(SystemRoot·LOCALAPPDATA 등)는 실제 시스템에 따라 달려 있어
-    홈 안 일반 폴더 허용 같은 판정을 오염시키므로 autouse fixture로 비운 뒤
-    하드코딩 후보(~/AppData, ~/Library, POSIX 마운트 루트)만으로 검증한다.
-    환경 변수 → 후보 반영 자체는 test_windows_system_roots_from_env 가 지킨다.
+    AppData 규칙에 걸린다. 그래서 conftest는 금지 목록 팩토리를 끄고, 이
+    클래스에서만 autouse fixture로 원본 팩토리를 복원해 제품 판정 함수
+    (_is_forbidden_root)를 직접 검증한다. 환경 변수 기반 후보(SystemRoot·
+    LOCALAPPDATA 등)는 실제 시스템에 따라 달려 있어 홈 안 일반 폴더 허용
+    같은 판정을 오염시키므로 autouse fixture로 비운 뒤 하드코딩 후보만으로
+    검증한다. 환경 변수 → 후보 반영 자체는 test_windows_system_roots_from_env
+    가 지킨다.
     """
 
     _ENV_ROOT_VARS = (
@@ -68,25 +69,25 @@ class TestForbiddenRoots:
     )
 
     @pytest.fixture(autouse=True)
-    def _isolate_env_roots(self, monkeypatch):
-        """환경 변수 기반 금지 후보를 지워 실제 시스템 폴더와 격리한다.
+    def _restore_default_rules(self, monkeypatch):
+        """환경 변수 기반 금지 후보를 지우고 원본 팩토리를 복원한다.
 
-        Windows의 tmp_path 자체가 %LOCALAPPDATA%\\Temp 안이라 후보가 살아 있으면
-        home/Documents 같은 무고한 경로까지 금지로 오탐한다(CI 회귀).
+        환경 변수 후보를 지우는 이유: Windows의 tmp_path 자체가
+        %LOCALAPPDATA%\\Temp 안이라 후보가 살아 있으면 home/Documents 같은
+        무고한 경로까지 금지로 오탐한다(CI 회귀).
         """
+        from wiki_mcp.kb import sources as kb_sources
+
         for var in self._ENV_ROOT_VARS:
             monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr(
+            kb_sources, "_forbidden_roots_factory", kb_sources._default_forbidden_roots
+        )
 
     def _forbidden(self, home: Path, p: Path) -> bool:
-        from wiki_mcp.kb.sources import _default_forbidden_roots
-        from wiki_mcp.kb.store import is_same_or_inside
+        from wiki_mcp.kb.sources import _is_forbidden_root
 
-        target = Path(p).resolve()
-        if target == target.parent:
-            return True
-        if is_same_or_inside(home, target):  # 홈 자신·홈의 모든 상위 폴더
-            return True
-        return any(is_same_or_inside(target, c) for c in _default_forbidden_roots(home))
+        return _is_forbidden_root(Path(p).resolve(), home)
 
     def test_appdata_rejected_even_without_env_vars(self, tmp_path):
         home = tmp_path / "home"
@@ -110,6 +111,34 @@ class TestForbiddenRoots:
         home.mkdir(parents=True)
         for name in ("/Volumes", "/mnt", "/media"):
             assert self._forbidden(home, Path(name) / "usb"), name
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX 마운트 루트 — Windows엔 없다")
+    def test_posix_mount_root_direct_child_only_rejected(self, tmp_path):
+        """마운트 루트는 자체와 바로 아래 한 단계(드라이브 전체)만 거부한다.
+
+        회귀: /home·/Users 가 후보에 남아 있으면 홈 아래 폴더 전체가 거부된다.
+        /Volumes/USB/자료 처럼 더 깊은 폴더는 특정 폴더 지정이므로 허용한다.
+        """
+        home = tmp_path / "home" / "user"
+        home.mkdir(parents=True)
+        assert self._forbidden(home, Path("/Volumes"))
+        assert self._forbidden(home, Path("/Volumes/USB"))  # 드라이브 전체
+        assert not self._forbidden(home, Path("/Volumes/USB/자료"))
+        assert not self._forbidden(home, Path("/mnt/usb/docs"))
+        assert not self._forbidden(home, Path("/media/usb/docs"))
+
+    def test_other_users_home_rejected_but_deeper_allowed(self, tmp_path):
+        """홈의 부모 바로 아래 한 단계(다른 사용자 홈 전체)는 거부한다.
+
+        본인 홈 아래(~/문서)는 물론, 다른 사용자 홈의 하위 폴더(/Users/other/
+        docs)는 특정 폴더 지정이므로 허용한다. 홈 상위 규칙만으로는 다른
+        사용자 홈(/Users/other)을 막지 못해 별도 규칙이 필요하다.
+        """
+        home = tmp_path / "home" / "user"
+        home.mkdir(parents=True)
+        assert self._forbidden(home, tmp_path / "home" / "other")  # 다른 사용자 홈
+        assert not self._forbidden(home, tmp_path / "home" / "other" / "docs")
+        assert not self._forbidden(home, home / "문서")  # 본인 홈 아래 허용
 
     @pytest.mark.skipif(os.name != "nt", reason="Windows 드라이브 루트 전용")
     def test_windows_drive_root_and_users_parent_rejected(self):
@@ -136,12 +165,16 @@ class TestForbiddenRoots:
         roots = [str(r) for r in _default_forbidden_roots(home)]
         assert str(win) in roots
 
-    def test_injected_empty_roots_allow_tmp_paths(self, kb, tmp_path):
-        """conftest 가 끄는 팩토리가 꺼져 있으면 tmp_path 등록이 막히지 않는다.
+    def test_injected_empty_roots_allow_tmp_paths(self, kb, tmp_path, monkeypatch):
+        """팩토리가 꺼져 있으면 tmp_path 등록이 막히지 않는다.
 
-        이 테스트 자체가 autouse fixture(팩토리 → [])를 거친다 — Windows CI의
-        AppData Temp 경로 tmp_path가 system_folder 없이 등록되어야 한다.
+        클래스 autouse fixture가 원본 팩토리를 복원하므로, 이 테스트에서만
+        다시 꺼서 conftest 가 쓰는 빈 팩토리 주입(Windows CI의 AppData Temp
+        경로 tmp_path가 system_folder 없이 등록되는지)을 재현한다.
         """
+        from wiki_mcp.kb import sources as kb_sources
+
+        monkeypatch.setattr(kb_sources, "_forbidden_roots_factory", lambda home: [])
         somewhere = tmp_path / "somewhere"
         somewhere.mkdir()
         out = add_source(kb, somewhere)
@@ -229,6 +262,49 @@ class TestAddSource:
         with pytest.raises(KBError) as ei:
             add_source(kb, home, home=home)
         assert ei.value.code == "system_folder"
+
+    def test_home_subfolder_allowed_with_default_rules(self, kb, tmp_path, monkeypatch):
+        """홈 아래 일반 폴더는 기본 금지 규칙(팩토리 주입 해제)으로도 등록된다.
+
+        회귀 재현: /home·/Users 가 마운트 루트 후보에 남아 홈 안 전체가
+        system_folder 로 거부되던 버그 — macOS·Linux CI의 basetemp 가 홈
+        아래(/Users/runner/work/_temp 등)라 add-source 전체가 막혔다.
+        """
+        from wiki_mcp.kb import sources as kb_sources
+
+        monkeypatch.setattr(
+            kb_sources, "_forbidden_roots_factory", kb_sources._default_forbidden_roots
+        )
+        for var in TestForbiddenRoots._ENV_ROOT_VARS:  # 실제 시스템 폴더와 격리
+            monkeypatch.delenv(var, raising=False)
+        home = tmp_path / "home"
+        home.mkdir()
+        docs = home / "문서" / "보고서"
+        docs.mkdir(parents=True)
+        out = add_source(kb, docs, home=home)
+        assert out["source"]["path"] == str(docs.resolve())
+
+    def test_real_home_subfolder_registers(self, kb, monkeypatch):
+        """실제 홈 아래 임시 폴더 등록 — 기본 팩토리·기본 home으로 재현(회귀).
+
+        홈 아래 폴더 하나를 만들어 등록 성공을 확인하고 폴더는 지운다.
+        ~/.cache 는 AppData·Library 같은 후보와 겹치지 않는다.
+        """
+        import shutil
+        import uuid
+
+        from wiki_mcp.kb import sources as kb_sources
+
+        monkeypatch.setattr(
+            kb_sources, "_forbidden_roots_factory", kb_sources._default_forbidden_roots
+        )
+        docs = Path.home() / ".cache" / f"wiki-mcp-test-{uuid.uuid4().hex[:8]}"
+        docs.mkdir(parents=True)
+        try:
+            out = add_source(kb, docs)  # home 기본값 = Path.home()
+            assert out["source"]["path"] == str(docs.resolve())
+        finally:
+            shutil.rmtree(docs, ignore_errors=True)
 
     def test_system_folder_rejected_with_injected_home(self, kb, tmp_path, monkeypatch):
         """home을 주입하면 ~/Library·~/AppData가 그대로 거부된다(팩토리 복원 검증).

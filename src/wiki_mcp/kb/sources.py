@@ -16,6 +16,7 @@ from wiki_mcp.kb.store import (
     is_same_or_inside,
     kb_lock,
     now_iso,
+    path_key,
     reject_remote_source_path,
 )
 
@@ -42,18 +43,23 @@ SENSITIVE_NAME_PARTS = (
     "재무",
 )
 
-# 홈을 포함하는 상위 폴더(POSIX) — 홈의 조상은 is_same_or_inside(home, p) 로
-# 이미 거부되지만, /Volumes·/mnt 처럼 조상은 아닌 공유 마운트 지점도 막는다.
-_POSIX_MOUNT_ROOTS = ("/Volumes", "/mnt", "/media", "/home", "/Users")
+# POSIX 마운트 루트 — 후보 목록이 아니라 "자체와 바로 아래 한 단계"만 거부한다.
+# 바로 아래 한 단계(/Volumes/USB 등)가 드라이브 전체를 뜻하기 때문이고,
+# /Volumes/USB/자료 처럼 더 깊은 폴더는 특정 폴더 지정이므로 허용한다.
+# /home·/Users 는 여기에 두지 않는다 — 홈과 홈의 상위는 is_same_or_inside
+# (home, p) 규칙이, 다른 사용자 홈은 "홈의 부모 바로 아래" 규칙이 처리한다.
+_POSIX_MOUNT_ROOTS = ("/Volumes", "/mnt", "/media")
 
 
 def _default_forbidden_roots(home: Path) -> list[Path]:
-    """금지 폴더 후보 — 시스템 폴더는 환경 변수로 만든다(C: 하드코딩 금지).
+    """금지 폴더 후보(안쪽 전체 거부) — 시스템 폴더는 환경 변수로 만든다(C: 하드코딩 금지).
 
     Windows 시스템 폴더는 %SystemRoot%·%ProgramFiles%·%ProgramFiles(x86)%·
     %ProgramData%·%LOCALAPPDATA%·%APPDATA% 에서 읽는다. 환경 변수가 없는
     플랫폼(macOS/Linux)에서는 대응 후보가 비는 대신 ~/AppData 같은 Windows
-    관례 폴더와 POSIX 시스템 폴더를 후보로 둔다.
+    관례 폴더와 POSIX 시스템 폴더를 후보로 둔다. 후보 안쪽 전체를 거부해도
+    되는 폴더만 여기에 둔다 — 마운트 루트·홈의 부모처럼 "바로 아래 한 단계까지만"
+    거부하는 규칙은 _is_forbidden_root 이 직접 다룬다.
     """
     candidates: list[Path] = [home / "AppData", home / "Library", Path("/System"), Path("/Library")]
     for var in (
@@ -67,7 +73,6 @@ def _default_forbidden_roots(home: Path) -> list[Path]:
         value = os.environ.get(var, "")
         if value:
             candidates.append(Path(value))
-    candidates.extend(Path(p) for p in _POSIX_MOUNT_ROOTS)
     return candidates
 
 
@@ -77,12 +82,36 @@ def _default_forbidden_roots(home: Path) -> list[Path]:
 _forbidden_roots_factory = _default_forbidden_roots
 
 
+def _is_root_or_direct_child(p: Path, base: Path) -> bool:
+    """p 가 base 자신이거나 base 바로 아래 한 단계인가(더 깊으면 거짓).
+
+    Windows 대소문자·구분자 차이는 path_key 로 흡수한다.
+    """
+    pk, bk = path_key(p), path_key(base)
+    if pk == bk:
+        return True
+    if not pk.startswith(bk + os.sep):
+        return False
+    rest = pk[len(bk) + len(os.sep) :]
+    return bool(rest) and os.sep not in rest
+
+
 def _is_forbidden_root(p: Path, home: Path) -> bool:
-    """드라이브/파일시스템 루트, 홈과 홈의 모든 상위 폴더, 시스템 폴더는 등록할 수 없다."""
+    """드라이브/파일시스템 루트, 홈과 홈의 모든 상위 폴더, 다른 사용자 홈,
+    마운트 루트(자체와 바로 아래 한 단계), 시스템 폴더는 등록할 수 없다."""
     if p == p.parent:  # 루트 (POSIX "/", Windows "C:\\")
         return True
     if is_same_or_inside(home, p):  # p가 홈 자신이거나 홈을 포함(C:\\Users, /Users, /home)
         return True
+    # 홈의 부모 바로 아래 한 단계 = 다른 사용자의 홈 전체(/Users/other 등).
+    # 홈의 부모가 파일시스템 루트면(/root 홈) 루트 아래 전부를 금지하는 꼴이
+    # 되므로 이 규칙은 건너뛴다. 본인 홈 아래(~/문서)는 이 규칙에 걸리지 않는다.
+    if home.parent != home.parent.parent and _is_root_or_direct_child(p, home.parent):
+        return True
+    # 마운트 루트는 자체와 바로 아래 한 단계(드라이브 전체)만 거부한다.
+    for mount in _POSIX_MOUNT_ROOTS:
+        if _is_root_or_direct_child(p, Path(mount)):
+            return True
     for cand in _forbidden_roots_factory(home):
         if is_same_or_inside(p, cand):
             return True
