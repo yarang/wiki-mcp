@@ -31,6 +31,16 @@ KB_MAX_INDEX_CHARS = int(os.environ.get("WIKI_KB_MAX_INDEX_CHARS", "30000000"))
 # 속을 수 있으므로 기본은 MCP 에서 원본 목록을 바꾸지 못하게 막는다(S1).
 KB_MCP_MANAGE = os.environ.get("WIKI_KB_MCP_MANAGE", "").lower() in ("1", "true", "yes")
 
+# 0.4.0 — 초안 승인·반려 도구를 MCP 로도 노출할지(기본 꺼짐). 승인은 사람이
+# 앱(CLI kb drafts-approve)에서 한다. Claude Code 처럼 사람이 직접 검토하며
+# 호출하는 경우만 켠다(R11). 이력에 actor:"mcp" 로 구분해 남는다.
+KB_MCP_REVIEW = os.environ.get("WIKI_KB_MCP_REVIEW", "").lower() in ("1", "true", "yes")
+
+# 0.4.0 — KB 모드에서 숨긴 직접 쓰기 도구(create_note·update_note·add_link·
+# delete_note)를 다시 노출할지(기본 꺼짐). 승인 관문(초안 대기열)을 우회할 수
+# 있어 KB 모드 기본값은 끈다(Q1). 비KB 모드는 그대로 노출된다.
+KB_MCP_DIRECT_WRITE = os.environ.get("WIKI_KB_MCP_DIRECT_WRITE", "").lower() in ("1", "true", "yes")
+
 
 def _default_wiki_path() -> Path:
     """Pick a sensible default WIKI_PATH when the env var is unset.

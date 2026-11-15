@@ -1,7 +1,7 @@
 # wiki-mcp
 
 LLM Wiki를 [MCP](https://modelcontextprotocol.io/) 도구로 노출하는 서버입니다.
-현재 버전 **0.3.0**. 한국어 원자 노트 wiki를 만들고 검색하고, **KB 모드**를
+현재 버전 **0.4.0**. 한국어 원자 노트 wiki를 만들고 검색하고, **KB 모드**를
 켜면 내 문서 폴더(HWPX·DOCX·PDF·XLSX 등)를 **그대로 둔 채** 근거와 함께
 검색할 수 있습니다.
 
@@ -9,6 +9,9 @@ LLM Wiki를 [MCP](https://modelcontextprotocol.io/) 도구로 노출하는 서�
 - 노트: `[[id]]` 링크 그래프, 템플릿, 백업·dry-run 안전장치가 있는 쓰기 도구
 - KB 모드(0.3.0 신규): 원본 폴더를 읽기만 하고 추출 결과를 지식 기반에 쌓는
   원본 보존 구조 — [docs/kb-mode.md](docs/kb-mode.md)
+- 초안 검토 대기열(0.4.0 신규): LLM은 **출처가 검증된 초안**을 저장만 하고,
+  사람이 승인해야 노트가 반영된다 — 원본 문서의 구절을 인용(quote)으로
+  남기고, 원본이 지워지거나 바뀌면 노트에 표시된다
 
 ## 설치
 
@@ -110,6 +113,26 @@ Claude에서는 이렇게 쓴다:
 허용하려면 환경 변수 `WIKI_KB_MCP_MANAGE=1`로 `add_source`·`remove_source`
 도구를 노출할 수 있다 — 그 경우에도 민감해 보이는 경로는 오류로 거부된다.
 
+### 초안 검토 대기열 (0.4.0)
+
+노트가 wiki에 반영되는 길은 두 개다. 비KB 모드는 그대로(직접 쓰기 도구).
+KB 모드에서는 LLM이 `save_draft`로 **초안**만 쓴다:
+
+1. LLM이 원본에서 근거를 찾아(`search_wiki`·`read_extract`) 초안을 저장한다
+   (`save_draft`). 인용(quote)이 추출 텍스트에 실제로 없으면 저장이 거부된다.
+2. 사람이 앱에서 원문과 초안을 나란히 보고 승인한다(CLI `kb drafts-approve`).
+3. 승인되면 노트가 wiki에 생기고 출처가 머리말(`kb_sources`)과 출처 절에
+   남는다. 승인·반려는 이력(`.kb/history.jsonl`)에 기록된다.
+4. 원본 파일이 지워지거나 바뀌면 다음 스캔에서 노트 머리말에
+   `kb_source_status: missing|changed` 표시가 붙는다(노트는 지우지 않는다).
+
+MCP의 승인·반려(`approve_draft`·`reject_draft`)는 기본 노출되지 않는다 —
+사람이 앱에서 승인하는 관문을 지키기 위해서다. Claude Code에서 사람이 직접
+`/wiki-review`로 검토하는 경우만 `WIKI_KB_MCP_REVIEW=1`로 켠다(이때도
+이력에 `actor: "mcp"`로 남는다). 0.3.0 대비 동작 변경: KB 모드에서 직접 쓰기
+도구(`create_note`·`update_note`·`add_link`·`delete_note`)가 기본 숨겨지고,
+`WIKI_KB_MCP_DIRECT_WRITE=1`로 다시 켤 수 있다.
+
 구조·상태 코드·제약은 [docs/kb-mode.md](docs/kb-mode.md) 참고.
 
 ## CLI (데스크톱 앱용)
@@ -123,6 +146,13 @@ wiki-mcp kb remove-source --kb DIR ID
 wiki-mcp kb list-sources --kb DIR
 wiki-mcp kb scan --kb DIR
 wiki-mcp kb status --kb DIR
+wiki-mcp kb drafts-list --kb DIR [--limit N] [--offset N]
+wiki-mcp kb drafts-show --kb DIR DRAFT_ID [--context N]
+wiki-mcp kb drafts-approve --kb DIR DRAFT_ID
+wiki-mcp kb drafts-reject --kb DIR DRAFT_ID [--reason TEXT]
+wiki-mcp kb drafts-history --kb DIR [--limit N] [--offset N]
+wiki-mcp kb drafts-save --kb DIR --input FILE
+wiki-mcp kb mark-orphans --kb DIR
 ```
 
 stdout에는 JSON을 정확히 한 줄(UTF-8 고정), 로그는 stderr. 종료 코드:
@@ -152,6 +182,8 @@ stdout에는 JSON을 정확히 한 줄(UTF-8 고정), 로그는 stderr. 종료 �
 | `WIKI_KB_MAX_EXTRACT_CHARS` | `200000` | KB 추출 결과 상한(문자) |
 | `WIKI_KB_MAX_INDEX_CHARS` | `30000000` | KB 검색 색인에 넣는 원본 텍스트 총량 상한(문자) — 넘친 파일은 `kb_status`의 `index_truncated`로 보고 |
 | `WIKI_KB_MCP_MANAGE` | (끔) | `1`이면 원본 등록·해제 도구를 MCP 에도 노출(기본은 앱 CLI 전용) |
+| `WIKI_KB_MCP_REVIEW` | (끔) | 0.4.0 — `1`이면 초안 승인·반려(`approve_draft`·`reject_draft`)를 MCP 에 노출. 기본은 사람(앱 CLI `drafts-approve`) 전용 |
+| `WIKI_KB_MCP_DIRECT_WRITE` | (끔) | 0.4.0 — `1`이면 KB 모드에서 숨긴 직접 쓰기 도구(`create_note` 등 4종)를 다시 노출 |
 | `WIKI_MCP_TRANSPORT` | `stdio` | `stdio` 또는 `http`(원격 daemon) |
 | `WIKI_MCP_HOST`·`_PORT`·`_PATH` | `127.0.0.1:8765/mcp` | HTTP 전송 설정 |
 | `WIKI_MCP_API_KEY` | (없음) | HTTP 전송 Bearer 토큰 — 원격 노출 시 필수 |
@@ -161,25 +193,31 @@ stdout에는 JSON을 정확히 한 줄(UTF-8 고정), 로그는 stderr. 종료 �
 기존 15종(0.2.4와 동일): `search_wiki` `read_note` `find_related`
 `list_domains` `find_broken_links` `suggest_new_note` `get_wiki_stats`
 `verify_citations` `reindex` `create_note` `ingest_raw` `list_templates`
-`update_note` `add_link` `delete_note` — 단 KB 모드에서는 `ingest_raw`가
-빠진다(raw 폴더 대신 원본 보존 스캔을 쓴다).
+`update_note` `add_link` `delete_note` — 단 KB 모드에서는 `ingest_raw`와
+직접 쓰기 4종(`create_note`·`update_note`·`add_link`·`delete_note`)이
+빠진다(0.4.0 — 승인 관문 우회 방지, `WIKI_KB_MCP_DIRECT_WRITE=1`로 재노출).
 
-KB 모드 추가 5종(설명 첫 줄에 [읽기]/[관리] 표시):
+KB 모드 추가 9종(설명 첫 줄에 [읽기]/[관리]/[초안] 표시):
 
 | 도구 | 구분 | 일 |
 | --- | --- | --- |
 | `list_sources` | [읽기] | 등록된 원본 목록 |
-| `scan_sources` | [관리] | 결정적 스캔 — 새/바뀜/지움 추출 |
+| `scan_sources` | [관리] | 결정적 스캔 — 새/바뀜/지움 추출(끝에 소실 표시 갱신) |
 | `list_changes` | [읽기] | 마지막 스캔 변경 목록(상태 필터) |
 | `read_extract` | [읽기] | 원본 추출 결과 조각 읽기(offset/limit) |
 | `kb_status` | [읽기] | 원본별 파일 수·실패 목록·마지막 스캔·색인 상태 |
+| `save_draft` | [초안] | 검증된 초안을 대기열에 저장(wiki 무변경) |
+| `list_drafts` | [초안] | 대기 초안 목록(승인 가능 여부 포함) |
+| `get_draft` | [초안] | 초안 상세 — 본문·근거 인용·문맥(구분자로 감쌈) |
+| `mark_orphans` | [관리] | 연결 원본 소실 표시 갱신(scan이 자동 실행) |
 
-`WIKI_KB_MCP_MANAGE=1`일 때만 추가되는 관리 2종:
+플래그로 켜는 도구:
 
-| 도구 | 구분 | 일 |
+| 도구 | 환경 변수 | 일 |
 | --- | --- | --- |
-| `add_source` | [관리] | 원본 폴더 등록(민감 이름은 오류로 거부 — 앱에서 등록) |
-| `remove_source` | [관리] | 원본 등록 제거(원본 무사) |
+| `add_source`·`remove_source` | `WIKI_KB_MCP_MANAGE=1` | 원본 등록·해제(민감 이름은 오류로 거부 — 앱에서 등록) |
+| `approve_draft`·`reject_draft` | `WIKI_KB_MCP_REVIEW=1` | 초안 승인·반려(기본은 사람 앱 CLI 전용) |
+| `create_note` 등 직접 쓰기 4종 | `WIKI_KB_MCP_DIRECT_WRITE=1` | KB 모드에서 숨긴 직접 쓰기 재노출 |
 
 `search_wiki`는 `scope`(`all`/`notes`/`sources`) 인자를 받는다. KB 모드가
 아니면 이 인자는 무시되고 출력은 0.2.4와 같다.
@@ -227,7 +265,8 @@ src/wiki_mcp/
 ├── server.py      # FastMCP 서버 — 도구 정의/등록 (KB 모드: 기본 19종)
 ├── cli.py         # 진입점 — 인자 없으면 MCP, `kb` 하위 명령은 JSON CLI
 ├── indexer.py     # 인덱싱 + 하이브리드 검색 (한글 2-gram, chromadb 지연 로딩)
-├── kb/            # KB 모드 (0.3.0): store·sources·scanner·chunks·search·status
+├── kb/            # KB 모드: store·sources·scanner·chunks·search·status
+│                  #   + 0.4.0 drafts·evidence·notes·orphans·history (검토 대기열)
 ├── extract.py     # 문서 추출 (PDF/DOCX/PPTX/XLSX/HTML/HWPX) + 위치 표지
 ├── graph.py       # [[id]] 링크 그래프
 ├── writer.py      # 노트 생성·수정·삭제 (검증·백업·템플릿)
@@ -237,6 +276,30 @@ src/wiki_mcp/
 ├── config.py      # 환경 변수 / 경로 해석
 └── auth.py        # HTTP 모드 Bearer 인증
 ```
+
+## 변경 이력 (Changelog)
+
+### 0.4.0
+
+- **초안 검토 대기열 추가(KB 모드)**: LLM(MCP)은 출처가 검증된 초안을
+  `.kb/drafts/`에 저장만 하고, 사람이 앱(`wiki-mcp kb drafts-approve`)에서
+  승인해야 `wiki/`에 노트가 생긴다. 승인·반려 이력은 `.kb/history.jsonl`에
+  append-only로 남는다. 자세한 규칙은 [docs/kb-mode.md](docs/kb-mode.md)와
+  [CLI JSON 계약](docs/cli-contract.md) 참고.
+- **KB 모드에서 직접 쓰기 도구 기본 숨김**: KB 모드의 MCP 서버에서
+  `create_note`·`update_note`·`add_link`·`delete_note`가 기본 노출되지
+  않는다 — 승인 관문(초안 대기열)을 LLM이 우회하지 못하게 한다.
+  `WIKI_KB_MCP_DIRECT_WRITE=1`로 다시 켤 수 있다. 비KB 모드는 0.3.0과
+  같이 항상 노출된다.
+- **노트 id·도메인 검증 강화(모든 모드, 0.3.0 동작 변경)**:
+  - `create_note`의 도메인(비KB 모드 포함)이 전체 100자·세그먼트 5개로
+    상한된다. 0.3.0에서 이보다 긴 도메인으로 만든 노트 생성이 이제
+    거부된다(기존 노트의 읽기·검색·수정은 그대로).
+  - Windows 예약 장치명(`con`·`nul`·`com1`~`com9` 등, 확장자가 붙어도)이
+    노트 id와 도메인 세그먼트에서 거부된다. 0.3.0에서 이 이름으로 만든
+    노트가 있다면 그 id로 새 초안을 만드는 호출이 거부될 수 있다.
+- **프롬프트 주입 방어**: 문서에서 온 문자열(원본 snippet·초안 본문·인용·
+  문맥 등)은 응답마다 무작위 nonce가 붙은 구분자로 감싸서 돌려준다.
 
 ## 이전 번들(openwebui-wiki-bundle) 사용자에게 바뀌는 점
 

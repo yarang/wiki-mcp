@@ -49,3 +49,8 @@ jobs:
         # system_folder 규칙에 걸린다. 러너 임시 폴더(D:\a\_temp 등)로 옮겨
         # 제품 규칙 그대로 돌게 한다(README 개발 절 참고).
         run: uv run --extra dev pytest -q --basetemp "${{ runner.temp }}/pytest"
+
+      # 0.4.0 — W2 검토 대기열 통합 인수 조건(tests_integration). pyproject 의
+      # testpaths 가 tests 라 기본 pytest 실행에 포함되지 않는다.
+      - name: Pytest (integration)
+        run: uv run --extra dev pytest tests_integration -q --basetemp "${{ runner.temp }}/pytest-it"

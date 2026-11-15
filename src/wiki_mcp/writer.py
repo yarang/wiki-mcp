@@ -16,19 +16,36 @@ from typing import Any
 import frontmatter
 
 # @MX:NOTE: [AUTO] ID validation regex — kebab-case, ASCII lowercase + digits + hyphen
-_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 _HANGUL_RE = re.compile(r"[가-힯]")
 # 도메인(폴더) 세그먼트 — 소문자/숫자 시작, [a-z0-9_-]만 허용
-_DOMAIN_SEGMENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+_DOMAIN_SEGMENT_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+# Windows 예약 장치명 — 세그먼트가 이 이름이면(확장자가 붙어도) 장치로 해석될
+# 수 있다. 쓰기가 조용히 사라지거나 이상한 경로로 흘러가므로 문자열 단계에서
+# 거부한다(concepts/nul.md 같은 경로를 미리 막는다).
+_WINDOWS_RESERVED_RE = re.compile(r"con|prn|aux|nul|com[1-9]|lpt[1-9]")
+# 도메인 전체 길이·깊이 상한 — 검증 없는 긴 도메인은 초안 저장을 멈추고
+# 승인을 File name too long 으로 죽게 한다(0.4.0 보안 리뷰 1).
+MAX_DOMAIN_CHARS = 100
+MAX_DOMAIN_SEGMENTS = 5
+
+
+def _reject_windows_reserved(name: str, *, what: str) -> None:
+    stem = name.split(".")[0]  # 확장자가 붙어도('con.md') 장치로 읽힌다
+    if _WINDOWS_RESERVED_RE.fullmatch(stem):
+        raise ValueError(f"{what}에 Windows 예약 장치명을 쓸 수 없다: '{name}'")
 
 
 def validate_domain(domain: str) -> str:
     """도메인 경로 검증 — 각 세그먼트가 [a-z0-9][a-z0-9_-]* 이어야 한다.
 
     `..`·절대 경로·드라이브 문자·한글 도메인을 모두 이 규칙이 거부한다.
-    여러 세그먼트는 '/'로 잇는다(a/b → a/b). 실패 시 ValueError.
+    여러 세그먼트는 '/'로 잇는다(a/b → a/b). 전체 100자·세그먼트 5개,
+    Windows 예약 장치명도 거부한다. 실패 시 ValueError.
     """
     normalized = (domain or "").strip()
+    if len(normalized) > MAX_DOMAIN_CHARS:
+        raise ValueError(f"도메인이 너무 길다(최대 {MAX_DOMAIN_CHARS}자, 입력 {len(normalized)}자)")
     if "\\" in normalized:  # 백슬래시 세그먼트(Windows·UNC 표기)는 허용하지 않는다
         raise ValueError(f"도메인 형식 오류 (domain: '{domain}'). 폴더 구분은 '/'만 쓴다")
     # 절대 경로('/tmp/...', '\\\\srv\\...')와 Windows 드라이브 문자('C:/...')는
@@ -44,12 +61,17 @@ def validate_domain(domain: str) -> str:
     segments = [s for s in normalized.split("/") if s]
     if not segments:
         raise ValueError("도메인이 비어 있음")
+    if len(segments) > MAX_DOMAIN_SEGMENTS:
+        raise ValueError(
+            f"도메인 깊이가 너무 깊다(최대 {MAX_DOMAIN_SEGMENTS}세그먼트, 입력 {len(segments)}개)"
+        )
     for seg in segments:
-        if not _DOMAIN_SEGMENT_RE.match(seg):
+        if not _DOMAIN_SEGMENT_RE.fullmatch(seg):
             raise ValueError(
                 f"도메인 형식 오류 (domain: '{domain}'). "
                 f"규칙: 세그먼트마다 소문자/숫자 시작, [a-z0-9_-]만 허용 (예: 'research', 'ml/rag')"
             )
+        _reject_windows_reserved(seg, what="도메인")
     return "/".join(segments)
 
 
@@ -95,13 +117,14 @@ def validate_note_id(id_str: str) -> str:
             f"ID에 한글 불가 (ID: '{id_str}'). 로마자화 권장 "
             f"(예: '프롬프트-엔지니어링' → 'prompt-engineering')"
         )
-    if not _ID_RE.match(normalized):
+    if not _ID_RE.fullmatch(normalized):
         raise ValueError(
             f"ID 형식 오류 (ID: '{id_str}'). "
             f"규칙: 소문자/숫자 시작, [a-z0-9-]만 허용, 하이픈으로 단어 구분"
         )
     if len(normalized) > 80:
         raise ValueError(f"ID 길이 초과 (최대 80자, 입력 {len(normalized)}자)")
+    _reject_windows_reserved(normalized, what="ID")
     return normalized
 
 
@@ -217,11 +240,16 @@ def backup_file(path: Path) -> Path | None:
     """파일을 <name>.bak.<YYYYMMDD-HHMMSS>로 복사.
 
     소스가 없으면 None 반환 (조용히 스킵 — create 시 정상 케이스).
+    같은 초에 두 번 백업하면 -1, -2 … 접미로 덮어쓰지 않게 한다.
     """
     if not path.exists():
         return None
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup = path.with_name(f"{path.name}.bak.{ts}")
+    n = 1
+    while backup.exists():
+        backup = path.with_name(f"{path.name}.bak.{ts}-{n}")
+        n += 1
     shutil.copy2(path, backup)
     return backup
 

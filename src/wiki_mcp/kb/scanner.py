@@ -567,6 +567,23 @@ def scan_sources(
                     "changes": changes,
                 }
             )
+
+        # 0.4.0 — 스캔 끝에 연결 원본 표시를 갱신한다(kb_lock 은 이미 빠져나와
+        # 재진입이 없고 scan.lock 안이다). links.json 손상 등 KBError 는 물론,
+        # 예상 밖 예외도 스캔을 실패시키지 않고 warnings 로 낮춘다 — manifest 는
+        # 이미 갱신됐으므로 scan 성공(0) 계약을 지킨다(0.3.0 하위 호환).
+        # last_scan.json 에는 orphans 를 넣지 않는다(매 스캔 다시 계산되는 값).
+        try:
+            from wiki_mcp.kb.orphans import mark_orphans
+
+            results["orphans"] = mark_orphans(kb)
+        except KBError as e:
+            results["orphans"] = None
+            warnings.append({"code": "mark_orphans_failed", "detail": e.code})
+        except Exception as e:  # noqa: BLE001 — scan 은 표시 갱신 실패로 죽지 않는다
+            _log(f"⚠️ mark_orphans 예상 밖 실패: {type(e).__name__}: {e}")
+            results["orphans"] = None
+            warnings.append({"code": "mark_orphans_failed", "detail": "internal"})
         return results
 
 

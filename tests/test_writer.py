@@ -507,3 +507,59 @@ class TestPathEscape:
         assert r["status"] == "error"
         assert "wiki 밖" in r["error"]
         assert linked_outside.exists()
+
+
+# ─── 0.4.0 리뷰 반영 — 검증 강화 ──────────────────────────────────────
+class TestValidateDomainLimits:
+    """도메인 상한과 Windows 예약 장치명, 정규식 끝 우회를 막는다."""
+
+    def test_over_100_chars_rejected(self):
+        with pytest.raises(ValueError):
+            validate_domain("a/" * 51)  # 102자
+
+    def test_over_5_segments_rejected(self):
+        with pytest.raises(ValueError):
+            validate_domain("a/b/c/d/e/f")
+
+    def test_exactly_5_segments_accepted(self):
+        assert validate_domain("a/b/c/d/e") == "a/b/c/d/e"
+
+    @pytest.mark.parametrize("domain", ["con", "nul", "aux", "prn", "com1", "lpt9", "a/nul"])
+    def test_windows_reserved_device_names_rejected(self, domain):
+        with pytest.raises(ValueError):
+            validate_domain(domain)
+
+    def test_trailing_newline_rejected(self):
+        # re.match 의 '$' 는 끝 개행 하나를 허용한다 — fullmatch 로 막는다
+        with pytest.raises(ValueError):
+            validate_domain("ab\n/cd")
+
+    def test_segment_with_interior_newline_rejected(self):
+        with pytest.raises(ValueError):
+            validate_domain("a\nb/c")
+
+
+class TestValidateNoteIdReserved:
+    @pytest.mark.parametrize("note_id", ["con", "nul", "aux", "prn", "com1", "lpt9"])
+    def test_windows_reserved_device_names_rejected(self, note_id):
+        with pytest.raises(ValueError):
+            validate_note_id(note_id)
+
+    def test_normal_id_still_accepted(self):
+        assert validate_note_id("console-log") == "console-log"
+        assert validate_note_id("contact") == "contact"
+
+
+class TestBackupFileCollision:
+    def test_same_second_backups_do_not_overwrite(self, tmp_path):
+        from wiki_mcp.writer import backup_file
+
+        src = tmp_path / "note.md"
+        src.write_text("v1", encoding="utf-8")
+        first = backup_file(src)
+        src.write_text("v2", encoding="utf-8")
+        second = backup_file(src)
+        assert first is not None and second is not None
+        assert first != second
+        assert first.read_text(encoding="utf-8") == "v1"
+        assert second.read_text(encoding="utf-8") == "v2"

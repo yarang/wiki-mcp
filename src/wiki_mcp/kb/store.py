@@ -103,13 +103,16 @@ def reject_remote_source_path(raw: object) -> None:
 def atomic_write_text(path: Path, data: str) -> None:
     """임시 파일 쓰고 원자적 교체(H7) — flush+fsync 후 같은 디렉토리에서 rename.
 
+    newline="" — 쓴 문자열의 줄끝을 그대로 쓴다. 기본값(newline=None)은
+    Windows 에서 \\n 을 os.linesep(CRLF) 로 번역해, 노트 줄끝이 조용히 바뀌는
+    일을 낳는다(0.4.0 코드 리뷰 — notes.preserve_newlines 와 짝을 이룬다).
     Windows 는 열려 있는 파일의 replace 가 PermissionError(공유 위반)를 낸다 —
     바이러스 검사·인덱서가 잠깐 잡은 경우 50ms 간격으로 최대 10회 재시도한다.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
@@ -203,6 +206,11 @@ class KnowledgeBase:
         self.last_scan_file = self.meta_dir / "last_scan.json"
         self.lock_file = self.meta_dir / "scan.lock"
         self.wiki_dir = self.root / "wiki"
+        # 0.4.0 검토 대기열 — init() 은 바꾸지 않는다(0.3.0 의 "재실행하면
+        # created 빈 배열" 계약 유지). 첫 save/approve 때 지연 생성한다.
+        self.drafts_dir = self.meta_dir / "drafts"
+        self.links_file = self.meta_dir / "links.json"
+        self.history_file = self.meta_dir / "history.jsonl"
 
     # ─── 초기화 ──────────────────────────────────────────────
     def init(self) -> dict:
@@ -294,6 +302,25 @@ class KnowledgeBase:
 
     def extract_path(self, sha256: str) -> Path:
         return self.extract_dir / f"{self.extract_id(sha256)}.md"
+
+    # ─── links.json (0.4.0 — 노트 ↔ 원본 연결 색인) ────────────
+    def load_links(self) -> dict:
+        """노트-원본 연결 색인. 없으면 빈 구조. 손상 시 corrupt_links.
+
+        자동 격리하지 않는다 — 유일한 연결 기록이라 사용자 복구가 필요하다.
+        """
+        if not self.links_file.exists():
+            return {"version": 1, "links": []}
+        try:
+            data = json.loads(_read_text_retry(self.links_file))
+        except (json.JSONDecodeError, OSError) as e:
+            raise KBError("corrupt_links", f"links.json 을 읽지 못했다: {e}") from e
+        if not isinstance(data, dict) or not isinstance(data.get("links"), list):
+            raise KBError("corrupt_links", "links.json 형식이 잘못됐다")
+        return data
+
+    def save_links(self, data: dict) -> None:
+        atomic_write_text(self.links_file, json.dumps(data, ensure_ascii=False, indent=2))
 
     # ─── last_scan.json ──────────────────────────────────────
     def load_last_scan(self) -> dict | None:
